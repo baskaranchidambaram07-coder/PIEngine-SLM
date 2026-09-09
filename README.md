@@ -1,5 +1,13 @@
 # Offline Enterprise Agent Runtime — SLM Prototype
 
+![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-uvicorn-009688?logo=fastapi&logoColor=white)
+![React Native 0.79](https://img.shields.io/badge/React%20Native-0.79-61DAFB?logo=react&logoColor=black)
+![llama.cpp](https://img.shields.io/badge/llama.cpp-Qwen3%20GGUF-FF6F00)
+![Cloudflare Tunnel](https://img.shields.io/badge/Cloudflare-named%20tunnel-F38020?logo=cloudflare&logoColor=white)
+![Inference on-device](https://img.shields.io/badge/inference-100%25%20on--device-2EA043)
+![Status: prototype](https://img.shields.io/badge/status-working%20prototype-DAA520)
+
 Task-specific AI agents that run **entirely on an employee's device** — no cloud
 LLM, no data leaving the phone. Built around the "Meeting Intelligence" scenario
 for delivery managers / PMs / solution architects.
@@ -11,6 +19,52 @@ Three deliverables in this repo:
 | **Journey 1** | Agent Studio — create/tune agents, KB, tools, publish bundles | `studio/` on port **8100** | `https://<your-static-domain>.ngrok-free.dev` *(static)* — or `https://studio.<your-domain>` via §1c |
 | **Journey 2** | Device Runtime — agent store, offline RAG chat (web simulator) + phone-facing portal | `runtime/` on port **8200** | `https://<random>.trycloudflare.com` *(rotates per restart)* — or `https://portal.<your-domain>` via §1c |
 | **Android app** | Native runtime: installs agents from the portal, runs SLM + RAG + tools on the handset | `android_app/AgentRuntime/` | served at `<journey-2-url>/apk` |
+
+---
+
+## 0. Scope and status
+
+### What this set out to prove
+
+That a **small language model on the employee's own handset** can do useful,
+task-specific enterprise work — with a maker journey to build the agents and a
+device journey to run them — while no prompt, document or answer ever leaves
+the device. Concretely:
+
+1. Author an agent (persona + knowledge base + tools) in a web Studio and
+   publish it as a portable bundle.
+2. Install that bundle on a phone and run it **fully offline**: SLM inference,
+   RAG retrieval and tool calls, all on the handset.
+3. Give the organisation governance visibility without collecting content.
+4. Distribute it over a stable public URL, including multi-GB model downloads.
+
+### Done and verified
+
+| Area | State | Evidence |
+|---|---|---|
+| Journey 1 — Agent Studio | working | authoring, PDF/MD/TXT chunk + embed to SQLite, tool declarations, versioned bundle publish |
+| Journey 2 — Device Runtime | working | agent store, offline RAG chat over a managed `llama-server`, portal serving bundles/models/APK |
+| Android app | working on-device | Qwen3-0.6B end-to-end on a real handset: install → byte-exact model verify → RAG (12 chunks, 4 hits) → **4.1 tok/s** first turn (cold), **13 tok/s** warm |
+| Server-side inference | measured | Qwen3-1.7B Q4_K_M: **~8 tok/s** generation, **~49 tok/s** prefill (4 vCPU, no GPU) |
+| Embedding parity | verified | fastembed ONNX (Studio) vs llama.rn GGUF (phone): **0.9998** cosine on identical text |
+| Governance dashboard | working | KPIs, per-agent/per-model breakdowns, device list, live event log — metadata only, content stripped in code |
+| Landing page + light theme | working | `/welcome`, AI-Native light theme across both SPAs |
+| Portal URL auto-discovery | working | `GET /api/portal-url`; the app re-resolves and persists a new portal URL when its saved one stops answering |
+| Cloudflare named tunnel | implemented, not activated | `cloudflare/` renders and passes `cloudflared tunnel ingress validate`; **needs a domain to go live** |
+| Public repo | done | source only (~2.7 MB); weights, toolchains and runtime state excluded |
+
+### Pending
+
+| # | Item | Blocked by |
+|---|---|---|
+| 1 | **Activate the named tunnel** — permanent `studio.` / `portal.` hostnames | a Cloudflare account + a domain; then `cloudflare\setup.ps1` (§1c) |
+| 2 | **Qwen3-1.7B on the test handset** — init OOMs after weights load; 0.6B is that device's ceiling | root cause found (compute buffer driven by `n_ubatch`); needs a device with more headroom, or further batch tuning |
+| 3 | **Fine-tuning** (`finetune/`) — citation discipline, refusal behaviour, tool selection | no GPU on this server; QLoRA must run on a GPU box |
+| 4 | **iOS build** of the same RN app | needs a Mac or macOS CI runner |
+| 5 | **Production APK signing** | release currently uses the stock RN *debug* keystore — must be replaced before real distribution |
+| 6 | **Scale-out retrieval** — sqlite-vec + hybrid BM25/vector past ~10k chunks | not started |
+| 7 | **Bundle signing + encryption at rest, MDM distribution** | not started |
+| 8 | **Automated tests / CI** | none yet; verification to date is manual and end-to-end |
 
 ---
 
