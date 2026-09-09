@@ -376,6 +376,7 @@ especially prefill. On-device budget: SLM 0.4–2.3 GB + embedder 35 MB (GGUF q8
 | `sample_docs/` | Acme demo corpus (MOMs, status, risks, ADRs, customer profile) |
 | `scripts/` | service start scripts, `seed_demo.py` |
 | `cloudflare/` | named-tunnel setup for permanent URLs, portable to any machine — see its README |
+| `docs/` | [Business Requirements Document](docs/BRD.md) — as-built capability reference for the team |
 | `llama/` | llama.cpp b9957 Windows CPU binaries |
 | `tools/` | JDK 17, Android SDK, cloudflared |
 
