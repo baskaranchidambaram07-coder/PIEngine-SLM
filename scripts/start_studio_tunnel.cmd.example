@@ -1,0 +1,14 @@
+@echo off
+REM ---------------------------------------------------------------------------
+REM Journey 1 (Agent Studio, port 8100) over an ngrok static domain.
+REM Copy to start_studio_tunnel.cmd and fill in your own values — that copy is
+REM gitignored so a running deployment's hostname stays out of the public repo.
+REM
+REM Prefer cloudflare\setup.ps1 instead: one named tunnel covers BOTH journeys,
+REM with no transfer cap (ngrok free is ~1 GB/month, which a single 1 GB GGUF
+REM model download exhausts).
+REM
+REM Under SYSTEM, ngrok needs --config pointing at the installing user's
+REM ngrok.yml or auth fails with ERR_NGROK_4018.
+REM ---------------------------------------------------------------------------
+"C:\path\to\ngrok.exe" http --config "C:\Users\<you>\AppData\Local\ngrok\ngrok.yml" --url=your-static-domain.ngrok-free.dev 8100 --log stdout >> C:\slm\logs\ngrok.log 2>&1

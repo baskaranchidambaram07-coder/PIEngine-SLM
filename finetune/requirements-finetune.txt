@@ -1,0 +1,9 @@
+# GPU machine only (Linux + NVIDIA). torch install may need the CUDA index URL:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+torch>=2.4
+transformers>=4.51
+datasets>=2.20
+peft>=0.13
+trl>=0.12
+bitsandbytes>=0.44
+accelerate>=1.0

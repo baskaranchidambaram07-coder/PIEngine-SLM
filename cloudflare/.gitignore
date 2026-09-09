@@ -1,0 +1,8 @@
+# Tunnel credentials file (<tunnel-id>.json) — this is a SECRET: it authorises
+# anyone holding it to serve traffic on your hostnames. Copy it between your
+# own machines by hand; never commit it.
+*.json
+!tunnel.json
+
+# Rendered from config.template.yml on every start, with machine-local paths.
+config.yml

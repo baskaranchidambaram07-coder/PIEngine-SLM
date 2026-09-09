@@ -1,0 +1,380 @@
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Enclave — Private AI agents that run on-device</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+  :root{
+    --primary:#7C3AED; --primary-2:#A78BFA; --accent:#0891B2;
+    --bg:#FBFAFF; --surface:#FFFFFF; --fg:#1E1B4B; --muted:#6B7280;
+    --border:#E7E4F5; --soft:#F3F0FE; --ring:rgba(124,58,237,.35);
+    --shadow-sm:0 1px 2px rgba(30,27,75,.05), 0 1px 3px rgba(30,27,75,.08);
+    --shadow-md:0 6px 20px rgba(30,27,75,.08), 0 2px 6px rgba(30,27,75,.05);
+    --shadow-lg:0 24px 60px rgba(30,27,75,.14), 0 8px 24px rgba(30,27,75,.08);
+    --radius:16px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--fg);font-family:'Plus Jakarta Sans',-apple-system,system-ui,sans-serif;line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+  a{color:inherit;text-decoration:none}
+  .wrap{max-width:1160px;margin:0 auto;padding:0 24px}
+  .accent{color:var(--primary)}
+  /* subtle ambient background */
+  .glow{position:fixed;inset:0;z-index:-1;overflow:hidden;pointer-events:none}
+  .glow::before{content:"";position:absolute;top:-280px;left:50%;transform:translateX(-50%);width:900px;height:700px;background:radial-gradient(closest-side,rgba(124,58,237,.14),transparent 70%);}
+  .glow::after{content:"";position:absolute;top:120px;right:-200px;width:600px;height:600px;background:radial-gradient(closest-side,rgba(8,145,178,.10),transparent 70%);}
+
+  /* nav */
+  nav{position:sticky;top:0;z-index:50;backdrop-filter:saturate(180%) blur(12px);background:rgba(251,250,255,.8);border-bottom:1px solid var(--border)}
+  .nav-inner{display:flex;align-items:center;gap:12px;height:64px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px;letter-spacing:-.02em}
+  .logo{width:30px;height:30px;border-radius:9px;background:linear-gradient(135deg,var(--primary),var(--primary-2));display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(124,58,237,.35)}
+  .nav-links{display:flex;gap:28px;margin-left:32px;font-size:14.5px;font-weight:500;color:var(--muted)}
+  .nav-links a:hover{color:var(--fg)}
+  .nav-cta{margin-left:auto;display:flex;gap:10px;align-items:center}
+  .btn{display:inline-flex;align-items:center;gap:8px;font-family:inherit;font-weight:600;font-size:14.5px;border-radius:10px;padding:10px 18px;cursor:pointer;border:1px solid transparent;transition:transform .15s,box-shadow .15s,background .15s,border-color .15s}
+  .btn:focus-visible{outline:none;box-shadow:0 0 0 3px var(--ring)}
+  .btn-primary{background:var(--primary);color:#fff;box-shadow:0 2px 8px rgba(124,58,237,.3)}
+  .btn-primary:hover{transform:translateY(-1px);box-shadow:0 6px 18px rgba(124,58,237,.38)}
+  .btn-ghost{background:var(--surface);color:var(--fg);border-color:var(--border);box-shadow:var(--shadow-sm)}
+  .btn-ghost:hover{border-color:var(--primary-2);color:var(--primary)}
+  .btn-lg{padding:14px 26px;font-size:16px;border-radius:12px}
+  .nav-links a, .nav-ghost-sm{color:var(--muted)}
+
+  /* hero */
+  .hero{display:grid;grid-template-columns:1.05fr .95fr;gap:56px;align-items:center;padding:84px 0 72px}
+  .eyebrow{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--primary);background:var(--soft);border:1px solid var(--border);padding:6px 12px;border-radius:100px;margin-bottom:22px}
+  .eyebrow .pulse{width:7px;height:7px;border-radius:50%;background:var(--primary);box-shadow:0 0 0 0 var(--ring);animation:pulse 2s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(124,58,237,.5)}70%{box-shadow:0 0 0 8px rgba(124,58,237,0)}100%{box-shadow:0 0 0 0 rgba(124,58,237,0)}}
+  h1{font-size:52px;line-height:1.08;font-weight:800;letter-spacing:-.03em;margin-bottom:20px}
+  h1 .grad{background:linear-gradient(120deg,var(--primary),var(--accent));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .lead{font-size:18.5px;color:var(--muted);max-width:520px;margin-bottom:30px}
+  .hero-cta{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+  .hero-note{display:flex;gap:20px;margin-top:26px;flex-wrap:wrap;color:var(--muted);font-size:13.5px}
+  .hero-note span{display:inline-flex;align-items:center;gap:7px}
+  svg{display:block}
+  .ico{width:18px;height:18px;stroke:currentColor;stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .ico-sm{width:15px;height:15px}
+
+  /* chat preview */
+  .demo{position:relative}
+  .device{background:var(--surface);border:1px solid var(--border);border-radius:24px;box-shadow:var(--shadow-lg);overflow:hidden}
+  .device-bar{display:flex;align-items:center;gap:8px;padding:14px 18px;border-bottom:1px solid var(--border);background:linear-gradient(var(--surface),var(--bg))}
+  .device-bar .dots{display:flex;gap:6px}
+  .device-bar .dots i{width:10px;height:10px;border-radius:50%;display:block;background:#E2E0EC}
+  .device-title{font-size:13px;font-weight:600;margin-left:6px;color:var(--fg)}
+  .device-title small{color:var(--muted);font-weight:500}
+  .agent-badge{margin-left:auto;display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:600;color:var(--primary);background:var(--soft);padding:4px 10px;border-radius:100px}
+  .agent-badge .live{width:6px;height:6px;border-radius:50%;background:#16a34a;box-shadow:0 0 0 0 rgba(22,163,74,.5);animation:pulse 2s infinite}
+  .chat{padding:20px 18px;display:flex;flex-direction:column;gap:12px;min-height:376px;background:
+     radial-gradient(120% 90% at 100% 0,rgba(124,58,237,.05),transparent 50%);}
+  .bubble{max-width:85%;padding:11px 14px;border-radius:16px;font-size:14px;line-height:1.55}
+  .bubble.user{align-self:flex-end;background:var(--primary);color:#fff;border-bottom-right-radius:5px;box-shadow:0 2px 8px rgba(124,58,237,.28)}
+  .bubble.bot{align-self:flex-start;background:var(--surface);border:1px solid var(--border);border-bottom-left-radius:5px;box-shadow:var(--shadow-sm)}
+  .bubble.bot b{color:var(--primary)}
+  .typing{display:inline-flex;gap:5px;padding:4px 2px}
+  .typing i{width:8px;height:8px;border-radius:50%;background:var(--primary-2);animation:blink 1.4s infinite both}
+  .typing i:nth-child(2){animation-delay:.2s}.typing i:nth-child(3){animation-delay:.4s}
+  @keyframes blink{0%,80%,100%{opacity:.25;transform:translateY(0)}40%{opacity:1;transform:translateY(-3px)}}
+  .cursor{display:inline-block;width:2px;height:1.05em;background:var(--primary);margin-left:1px;vertical-align:-2px;animation:caret 1s step-end infinite}
+  @keyframes caret{50%{opacity:0}}
+  .srcs{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px;padding-top:8px;border-top:1px solid var(--border)}
+  .src{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:600;color:var(--primary);background:var(--soft);border:1px solid var(--border);padding:2px 8px;border-radius:7px}
+  .toolcall{align-self:flex-start;max-width:88%;font-family:'SFMono-Regular',Consolas,monospace;font-size:11.5px;color:#047857;background:#ECFDF5;border:1px solid #A7F3D0;border-radius:12px;padding:8px 12px}
+  .meta{font-size:11px;color:var(--muted);margin-top:2px;display:flex;align-items:center;gap:7px}
+  .meta .lock{width:12px;height:12px;stroke:#16a34a}
+  .float{position:absolute;background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow-md);padding:10px 13px;font-size:12px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .float .ic{width:26px;height:26px;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#fff}
+  .float.f1{top:-18px;left:-26px}
+  .float.f2{bottom:34px;right:-30px}
+
+  /* trusted band */
+  .band{padding:30px 0 8px;text-align:center}
+  .band p{font-size:12.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:20px}
+  .logos{display:flex;flex-wrap:wrap;justify-content:center;gap:14px 34px;align-items:center;opacity:.9}
+  .logo-item{display:inline-flex;align-items:center;gap:9px;color:#8b8aa3;font-weight:700;font-size:15px;letter-spacing:-.01em;filter:grayscale(1);transition:filter .2s,color .2s,opacity .2s;opacity:.75}
+  .logo-item:hover{filter:grayscale(0);opacity:1;color:var(--fg)}
+  .logo-item svg{width:22px;height:22px}
+
+  /* sections */
+  section{padding:78px 0}
+  .sec-head{text-align:center;max-width:660px;margin:0 auto 52px}
+  .sec-head .kicker{color:var(--primary);font-weight:700;font-size:13.5px;letter-spacing:.06em;text-transform:uppercase;margin-bottom:12px}
+  .sec-head h2{font-size:38px;line-height:1.15;font-weight:800;letter-spacing:-.02em;margin-bottom:14px}
+  .sec-head p{font-size:17px;color:var(--muted)}
+
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+  .feature{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:26px 24px;box-shadow:var(--shadow-sm);transition:transform .18s,box-shadow .18s,border-color .18s}
+  .feature:hover{transform:translateY(-3px);box-shadow:var(--shadow-md);border-color:var(--primary-2)}
+  .feature .fic{width:46px;height:46px;border-radius:12px;background:var(--soft);color:var(--primary);display:flex;align-items:center;justify-content:center;margin-bottom:16px}
+  .feature .fic svg{width:23px;height:23px}
+  .feature h3{font-size:17.5px;font-weight:700;margin-bottom:8px;letter-spacing:-.01em}
+  .feature p{font-size:14.5px;color:var(--muted)}
+
+  /* journeys */
+  .journeys{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+  .journey{position:relative;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:32px 30px;box-shadow:var(--shadow-sm);overflow:hidden}
+  .journey::before{content:"";position:absolute;inset:0 0 auto 0;height:4px;background:linear-gradient(90deg,var(--primary),var(--accent))}
+  .journey .num{font-size:13px;font-weight:800;color:var(--primary);letter-spacing:.1em}
+  .journey h3{font-size:23px;font-weight:800;margin:6px 0 10px;letter-spacing:-.02em}
+  .journey p{color:var(--muted);font-size:15px;margin-bottom:20px}
+  .journey ul{list-style:none;margin-bottom:24px;display:flex;flex-direction:column;gap:10px}
+  .journey li{display:flex;gap:10px;align-items:flex-start;font-size:14.5px}
+  .journey li svg{width:18px;height:18px;color:#16a34a;flex-shrink:0;margin-top:2px}
+
+  /* CTA */
+  .cta-band{margin:20px 0 0;background:linear-gradient(120deg,#2E1065,#5B21B6 60%,#0E7490);border-radius:26px;padding:60px 40px;text-align:center;color:#fff;position:relative;overflow:hidden;box-shadow:var(--shadow-lg)}
+  .cta-band::after{content:"";position:absolute;inset:0;background:radial-gradient(120% 120% at 50% -20%,rgba(255,255,255,.14),transparent 55%)}
+  .cta-band h2{font-size:36px;font-weight:800;letter-spacing:-.02em;margin-bottom:12px;position:relative}
+  .cta-band p{font-size:17px;opacity:.9;max-width:540px;margin:0 auto 28px;position:relative}
+  .cta-band .btn-primary{background:#fff;color:var(--primary);position:relative}
+  .cta-band .btn-primary:hover{background:#fff}
+  .cta-band .btn-ghost{background:rgba(255,255,255,.1);color:#fff;border-color:rgba(255,255,255,.3);position:relative}
+  .cta-band .btn-ghost:hover{background:rgba(255,255,255,.18);color:#fff}
+
+  footer{border-top:1px solid var(--border);padding:36px 0;color:var(--muted);font-size:13.5px}
+  .foot-inner{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+  .foot-inner .brand{font-size:15px}
+  .foot-inner .sp{margin-left:auto}
+
+  @media(max-width:900px){
+    .hero{grid-template-columns:1fr;gap:40px;padding:56px 0 48px}
+    h1{font-size:40px}
+    .grid{grid-template-columns:1fr 1fr}
+    .journeys{grid-template-columns:1fr}
+    .nav-links{display:none}
+    .float.f1{left:-8px}.float.f2{right:-8px}
+  }
+  @media(max-width:560px){
+    h1{font-size:33px}.sec-head h2{font-size:29px}
+    .grid{grid-template-columns:1fr}
+    .hero-cta{flex-direction:column;align-items:stretch}
+    .cta-band{padding:44px 22px}.cta-band h2{font-size:28px}
+    .float{display:none}
+  }
+  @media(prefers-reduced-motion:reduce){
+    *{animation:none!important;transition:none!important;scroll-behavior:auto!important}
+  }
+</style>
+
+<div class="glow"></div>
+
+<nav>
+  <div class="wrap nav-inner">
+    <a class="brand" href="#top">
+      <span class="logo"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 6v6c0 5 3.5 8 8 10 4.5-2 8-5 8-10V6z"/><path d="M9 12l2 2 4-4"/></svg></span>
+      Enclave<span style="color:var(--muted);font-weight:600"> AI</span>
+    </a>
+    <div class="nav-links">
+      <a href="#features">Capabilities</a>
+      <a href="#journeys">How it works</a>
+      <a href="#integrations">Integrations</a>
+    </div>
+    <div class="nav-cta">
+      <a class="btn btn-ghost" href="{{RUNTIME_URL}}" target="_blank" rel="noopener">Live device demo</a>
+      <a class="btn btn-primary" href="{{STUDIO}}">Try Now
+        <svg class="ico ico-sm" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+    </div>
+  </div>
+</nav>
+
+<span id="top"></span>
+<header class="wrap hero">
+  <div>
+    <span class="eyebrow"><span class="pulse"></span> Enterprise-grade · On-device AI</span>
+    <h1>Private AI agents that run <span class="grad">entirely on your team's phones.</span></h1>
+    <p class="lead">Enclave turns small language models into task-specific enterprise agents — with retrieval, tools, and governance — that run fully offline on the handset. No cloud LLM. No data ever leaves the device.</p>
+    <div class="hero-cta">
+      <a class="btn btn-primary btn-lg" href="{{STUDIO}}">Try Now — build an agent
+        <svg class="ico" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+      <a class="btn btn-ghost btn-lg" href="#demo-anchor">
+        <svg class="ico" viewBox="0 0 24 24"><polygon points="6 4 20 12 6 20 6 4"/></svg> Watch it stream</a>
+    </div>
+    <div class="hero-note">
+      <span><svg class="ico ico-sm" style="color:#16a34a" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg> Works in airplane mode</span>
+      <span><svg class="ico ico-sm" style="color:#16a34a" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg> Cited answers</span>
+      <span><svg class="ico ico-sm" style="color:#16a34a" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg> Zero content collected</span>
+    </div>
+  </div>
+
+  <div class="demo" id="demo-anchor">
+    <div class="float f1"><span class="ic" style="background:linear-gradient(135deg,#7C3AED,#A78BFA)"><svg class="ico ico-sm" viewBox="0 0 24 24" style="stroke:#fff"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4"/></svg></span>On-device SLM</div>
+    <div class="float f2"><span class="ic" style="background:linear-gradient(135deg,#0891B2,#22D3EE)"><svg class="ico ico-sm" viewBox="0 0 24 24" style="stroke:#fff"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></svg></span>13 tok/s · offline</div>
+    <div class="device">
+      <div class="device-bar">
+        <span class="dots"><i></i><i></i><i></i></span>
+        <span class="device-title">Meeting Intelligence <small>· on device</small></span>
+        <span class="agent-badge"><span class="live"></span> Offline-ready</span>
+      </div>
+      <div class="chat" id="chat"></div>
+    </div>
+  </div>
+</header>
+
+<div class="wrap band" id="integrations">
+  <p>Connects to the enterprise stack your teams already use</p>
+  <div class="logos" id="logos"></div>
+</div>
+
+<section id="features">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kicker">Capabilities</div>
+      <h2>A complete agent runtime, in your pocket</h2>
+      <p>Everything a cloud assistant does — inference, retrieval, and tool use — executed locally on the device, so sensitive data never leaves it.</p>
+    </div>
+    <div class="grid" id="features-grid"></div>
+  </div>
+</section>
+
+<section id="journeys" style="padding-top:8px">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kicker">How it works</div>
+      <h2>Two journeys, one private runtime</h2>
+      <p>Design and publish agents in the Studio; employees install and run them on any recent phone.</p>
+    </div>
+    <div class="journeys">
+      <div class="journey">
+        <div class="num">JOURNEY 01</div>
+        <h3>Agent Studio</h3>
+        <p>Pick a small language model, write the persona, upload documents into a lightweight knowledge base, attach tools, and publish a versioned agent bundle.</p>
+        <ul>
+          <li><svg class="ico" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg> Curated on-device model catalog (0.6B–4B)</li>
+          <li><svg class="ico" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg> Chunk + embed docs into a portable vector KB</li>
+          <li><svg class="ico" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg> Governance dashboard — usage, no content</li>
+        </ul>
+        <a class="btn btn-primary" href="{{STUDIO}}">Open Studio
+          <svg class="ico ico-sm" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+      </div>
+      <div class="journey">
+        <div class="num">JOURNEY 02</div>
+        <h3>Device Runtime</h3>
+        <p>Employees browse the agent store, install a bundle, and chat fully offline — inference, retrieval, and tools all execute on the handset.</p>
+        <ul>
+          <li><svg class="ico" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg> Native Android app + web device simulator</li>
+          <li><svg class="ico" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg> Retrieval with source citations</li>
+          <li><svg class="ico" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg> Upload your own files into an inline KB</li>
+        </ul>
+        <a class="btn btn-ghost" href="{{RUNTIME_URL}}" target="_blank" rel="noopener">Open live demo
+          <svg class="ico ico-sm" viewBox="0 0 24 24"><path d="M7 17 17 7M7 7h10v10"/></svg></a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section style="padding-top:0">
+  <div class="wrap">
+    <div class="cta-band">
+      <h2>Ship your first private agent today</h2>
+      <p>Build it in the Studio in minutes, publish a bundle, and run it offline on any iPhone 14 / Galaxy S23-class device.</p>
+      <div class="hero-cta" style="justify-content:center">
+        <a class="btn btn-primary btn-lg" href="{{STUDIO}}">Try Now
+          <svg class="ico" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+        <a class="btn btn-ghost btn-lg" href="{{RUNTIME_URL}}" target="_blank" rel="noopener">See a live device</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot-inner">
+    <span class="brand"><span class="logo" style="width:24px;height:24px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 6v6c0 5 3.5 8 8 10 4.5-2 8-5 8-10V6z"/><path d="M9 12l2 2 4-4"/></svg></span> Enclave AI</span>
+    <span>Offline Enterprise Agent Runtime</span>
+    <span class="sp">Private by design · Runs 100% on-device</span>
+  </div>
+</footer>
+
+<script>
+  // ---- integration logos (inline SVG marks, brand-neutral premium) ----
+  const LOGOS = [
+    ['Jira', '<path d="M12 2 3 11l4 4 5-5 5 5 4-4z" fill="currentColor" stroke="none"/>'],
+    ['Confluence', '<path d="M4 17c5-7 9-3 16-9M20 7c-5 7-9 3-16 9" fill="none"/>'],
+    ['Teams', '<rect x="3" y="6" width="12" height="12" rx="3"/><circle cx="18" cy="9" r="3"/>'],
+    ['Outlook', '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>'],
+    ['SharePoint', '<circle cx="9" cy="9" r="4"/><circle cx="16" cy="15" r="3"/>'],
+    ['Slack', '<rect x="9" y="3" width="6" height="6" rx="3"/><rect x="9" y="15" width="6" height="6" rx="3"/><rect x="3" y="9" width="6" height="6" rx="3"/><rect x="15" y="9" width="6" height="6" rx="3"/>'],
+    ['Salesforce', '<path d="M5 15a4 4 0 0 1 1-7.5A5 5 0 0 1 16 7a3.5 3.5 0 0 1 2 6.5A3 3 0 0 1 15 16H7a2.5 2.5 0 0 1-2-1z"/>'],
+    ['Hugging Face', '<circle cx="12" cy="12" r="8"/><path d="M9 10h.01M15 10h.01M8.5 14a4 4 0 0 0 7 0"/>'],
+  ];
+  document.getElementById('logos').innerHTML = LOGOS.map(([n,p])=>
+    `<span class="logo-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${p}</svg>${n}</span>`).join('');
+
+  // ---- feature cards ----
+  const FEATURES = [
+    ['On-device inference','Small language models run locally via llama.cpp — answers are generated on the handset, never sent to a cloud LLM.',
+      '<path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/><circle cx="12" cy="12" r="3.2"/>'],
+    ['Retrieval-augmented','A portable vector knowledge base ships with each agent. Answers cite the exact source document — no hallucinated facts.',
+      '<path d="M4 6v13a2 2 0 0 0 2 2h12M8 4h9a1 1 0 0 1 1 1v13H8a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"/>'],
+    ['Tool calling','Agents create tasks, draft emails, and query Jira or Confluence — degrading gracefully to on-device actions when offline.',
+      '<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2-2z"/>'],
+    ['Fully offline','After install, everything works in airplane mode — inference, retrieval, and tools all execute with zero connectivity.',
+      '<path d="M12 20h.01M8.5 16.4a5 5 0 0 1 7 0M5 12.9a10 10 0 0 1 14 0M2 9.4a15 15 0 0 1 20 0"/><path d="m2 2 20 20"/>'],
+    ['Agent Studio','Design, tune, and publish task-specific agents in minutes — model, persona, knowledge base, and tools in one place.',
+      '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/>'],
+    ['Governance','A usage dashboard tracks adoption, performance, and reliability across every device — metadata only, never message content.',
+      '<path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/>'],
+  ];
+  document.getElementById('features-grid').innerHTML = FEATURES.map(([t,d,ic])=>
+    `<div class="feature"><div class="fic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ic}</svg></div>
+     <h3>${t}</h3><p>${d}</p></div>`).join('');
+
+  // ---- streaming conversation demo ----
+  const chat = document.getElementById('chat');
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const el = (h) => { const d=document.createElement('div'); d.innerHTML=h.trim(); return d.firstChild; };
+  const sleep = (ms) => new Promise(r=>setTimeout(r, reduce?0:ms));
+
+  const ANSWER = "Two HIGH risks are open right now:<br><br>• <b>R-07 — UAT resourcing</b> not confirmed. Owner: Daniel Weber.<br>• <b>R-09 — search performance</b> below SLA. Owner: Tom Okafor.";
+  const SRCS = ['acme-risk-register.md', 'acme-status-2026-07-08.md'];
+
+  async function typeInto(node, html){
+    // stream by token-ish chunks; render HTML tags atomically
+    const tokens = html.match(/<[^>]+>|[^<]+/g) || [];
+    for (const tok of tokens){
+      if (tok.startsWith('<')) { node.insertAdjacentHTML('beforeend', tok); }
+      else {
+        for (const word of tok.split(/(\s+)/)){
+          node.insertAdjacentText('beforeend', word);
+          chat.scrollTop = chat.scrollHeight;
+          await sleep(38);
+        }
+      }
+    }
+  }
+
+  async function runDemo(){
+    chat.innerHTML = '';
+    // user question
+    const u = el(`<div class="bubble user"></div>`);
+    chat.appendChild(u);
+    await typeInto(u, "What are the open HIGH risks and who owns them?");
+    await sleep(500);
+
+    // typing indicator
+    const bot = el(`<div class="bubble bot"><span class="typing"><i></i><i></i><i></i></span></div>`);
+    chat.appendChild(bot); chat.scrollTop = chat.scrollHeight;
+    await sleep(1100);
+
+    // tool call flash
+    const tool = el(`<div class="toolcall">⚙ retrieving knowledge base…</div>`);
+    tool.textContent = '⚙ get_todays_meetings() · create_action_item()';
+    // replace typing with streamed answer
+    bot.innerHTML = '<span class="stream"></span><span class="cursor"></span>';
+    const stream = bot.querySelector('.stream');
+    await typeInto(stream, ANSWER);
+    bot.querySelector('.cursor')?.remove();
+
+    // source chips
+    const srcs = el(`<div class="srcs"></div>`);
+    srcs.innerHTML = SRCS.map(s=>`<span class="src"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2h9l3 3v17H6z"/><path d="M14 2v4h4"/></svg>${s}</span>`).join('');
+    bot.appendChild(srcs);
+
+    const meta = el(`<div class="meta"><svg class="ico ico-sm lock" viewBox="0 0 24 24" fill="none" stroke-width="2"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>12 chunks retrieved · generated on-device · 13 tok/s</div>`);
+    chat.appendChild(meta);
+    chat.scrollTop = chat.scrollHeight;
+
+    await sleep(4200);
+    runDemo();
+  }
+  runDemo();
+</script>

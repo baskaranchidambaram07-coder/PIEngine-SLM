@@ -1,0 +1,69 @@
+# ---------------------------------------------------------------------------
+# Vendored toolchains and model weights — gigabytes, all re-downloadable.
+#   models/  GGUF weights (~3 GB), fetched from Hugging Face
+#   tools/   JDK 17 + Android SDK + cloudflared (~5.4 GB)
+#   llama/   llama.cpp Windows CPU binaries
+# NOTE: git has no trailing-comment syntax — a "#" after a pattern becomes
+# part of the pattern. Keep comments on their own lines.
+# ---------------------------------------------------------------------------
+venv/
+models/
+tools/
+llama/
+*.gguf
+*.apk
+clt.zip
+
+# ---------------------------------------------------------------------------
+# Android build outputs and dependencies (~3.6 GB)
+# ---------------------------------------------------------------------------
+node_modules/
+android_app/AgentRuntime/android/build/
+android_app/AgentRuntime/android/app/build/
+android_app/AgentRuntime/android/.gradle/
+android_app/AgentRuntime/android/local.properties
+android_app/build.log
+.gradle/
+
+# ---------------------------------------------------------------------------
+# Runtime state and generated artifacts.
+# Regenerate the demo with: python scripts/seed_demo.py
+#   bundles/               published agent bundles (build output)
+#   studio/studio.db       authored agents, local working state
+#   studio/kb/             embedded KBs — contain uploaded document text
+#   runtime/device_storage/ simulated device's installed agents
+#   telemetry.db           governance events, incl. device identifiers
+# ---------------------------------------------------------------------------
+bundles/
+studio/studio.db
+studio/kb/
+runtime/device_storage/
+telemetry.db
+pipetest.out
+
+# ---------------------------------------------------------------------------
+# Logs — these record live tunnel hostnames.
+# ---------------------------------------------------------------------------
+logs/
+*.log
+
+# ---------------------------------------------------------------------------
+# Local machine config. Tunnel secrets are covered by cloudflare/.gitignore.
+# ---------------------------------------------------------------------------
+.claude/settings.local.json
+
+# ---------------------------------------------------------------------------
+# Python / editor noise
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Deployment-specific — real hostnames of a running deployment.
+# Templates are committed as *.example; copy and fill them in locally.
+android_app/AgentRuntime/src/config.local.ts
+scripts/start_studio_tunnel.cmd

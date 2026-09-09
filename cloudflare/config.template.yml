@@ -1,0 +1,42 @@
+# ---------------------------------------------------------------------------
+# Cloudflare named-tunnel ingress for the Offline Enterprise Agent Runtime.
+#
+# This file is a TEMPLATE. run.ps1 renders it to config.yml on every start,
+# substituting the machine-specific absolute paths and the hostnames recorded
+# in tunnel.json. Edit THIS file (not config.yml) to change routing.
+#
+# Placeholders: {{TUNNEL_ID}} {{CREDENTIALS_FILE}} {{STUDIO_HOSTNAME}}
+#               {{PORTAL_HOSTNAME}} {{LOG_FILE}}
+# ---------------------------------------------------------------------------
+
+tunnel: {{TUNNEL_ID}}
+credentials-file: {{CREDENTIALS_FILE}}
+
+# Keep the tunnel healthy for multi-GB model downloads and long SSE chat
+# streams. Four QUIC connections ride out a single edge connection dropping.
+protocol: quic
+edge-ip-version: auto
+retries: 10
+grace-period: 30s
+loglevel: info
+logfile: {{LOG_FILE}}
+
+ingress:
+  # Journey 1 - Agent Studio (authoring, governance dashboard, landing page)
+  - hostname: {{STUDIO_HOSTNAME}}
+    service: http://127.0.0.1:8100
+    originRequest:
+      connectTimeout: 30s
+      # Model/bundle downloads and token streams must not be cut off mid-flight.
+      noTLSVerify: false
+      disableChunkedEncoding: false
+
+  # Journey 2 - Device Runtime / phone-facing portal (bundles, GGUF models, APK)
+  - hostname: {{PORTAL_HOSTNAME}}
+    service: http://127.0.0.1:8200
+    originRequest:
+      connectTimeout: 30s
+      disableChunkedEncoding: false
+
+  # Anything else that reaches this tunnel is not ours.
+  - service: http_status:404
