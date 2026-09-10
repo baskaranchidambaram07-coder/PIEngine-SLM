@@ -21,7 +21,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, PlainTextResponse,
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from core import embeddings, kbstore, telemetry
+from core import adapters, embeddings, gating, kbstore, telemetry, versions
 from core.paths import BUNDLES_DIR, MODELS_DIR, ROOT
 
 from . import export, llm, tools
@@ -62,6 +62,32 @@ def model_state(manifest: dict) -> str:
     return "missing"
 
 
+def adapter_path(manifest: dict) -> Path | None:
+    """Local path to this agent's LoRA adapter, if it has one and it is here.
+
+    A missing adapter is not fatal: the agent still runs on the shared base
+    model, just with stock behaviour. Failing the chat instead would make a
+    ~30 MB download a hard dependency of a 1 GB model that is already present.
+    """
+    ad = manifest.get("adapter")
+    if not ad:
+        return None
+    p = adapters.ADAPTERS_DIR / ad["file"]
+    return p if p.exists() else None
+
+
+def adapter_state(manifest: dict) -> str:
+    ad = manifest.get("adapter")
+    if not ad:
+        return "none"
+    if adapter_path(manifest):
+        return "ready"
+    dl = _model_downloads.get(ad["file"])
+    if dl and not dl.get("error"):
+        return "downloading"
+    return "missing"
+
+
 @app.get("/api/installed")
 def api_installed():
     out = []
@@ -73,6 +99,8 @@ def api_installed():
             "version": m["version"], "model": m["model"], "rag": m["rag"],
             "tools": [t["name"] for t in m.get("tools", [])],
             "model_state": model_state(m),
+            "version_state": versions.state_of(aid, m["version"]),
+            "adapter": m.get("adapter"), "adapter_state": adapter_state(m),
             "download": {"done": dl.get("done", 0), "total": dl.get("total", 0),
                           "error": dl.get("error")} if dl else None,
         })
@@ -121,6 +149,26 @@ def _download_model(model: dict) -> None:
         prog["error"] = str(exc)[:300]
 
 
+def _download_adapter(adapter: dict) -> None:
+    """Adapters come from the portal, not Hugging Face — they are ours."""
+    f = adapter["file"]
+    prog = _model_downloads.setdefault(f, {"total": 0, "done": 0, "error": None})
+    try:
+        adapters.ADAPTERS_DIR.mkdir(parents=True, exist_ok=True)
+        url = adapter.get("download_url") or f"{STUDIO_URL}/adapters/{f}"
+        with requests.get(url, stream=True, timeout=60) as r:
+            r.raise_for_status()
+            prog["total"] = int(r.headers.get("content-length", 0))
+            tmp = adapters.ADAPTERS_DIR / (f + ".part")
+            with open(tmp, "wb") as fh:
+                for chunk in r.iter_content(chunk_size=1 << 20):
+                    fh.write(chunk)
+                    prog["done"] += len(chunk)
+            tmp.rename(adapters.ADAPTERS_DIR / f)
+    except Exception as exc:  # noqa: BLE001 — surface any failure to the UI
+        prog["error"] = str(exc)[:300]
+
+
 class InstallIn(BaseModel):
     id: str
 
@@ -146,6 +194,9 @@ def api_install(body: InstallIn):
     if state == "missing":
         threading.Thread(target=_download_model, args=(manifest["model"],), daemon=True).start()
         state = "downloading"
+    if adapter_state(manifest) == "missing":
+        threading.Thread(target=_download_adapter, args=(manifest["adapter"],),
+                         daemon=True).start()
     telemetry.record(source="web-runtime", device_id="web-sim", event="install", ok=1,
                      agent_id=body.id, agent_version=manifest["version"],
                      model_id=manifest["model"]["id"])
@@ -185,7 +236,18 @@ def export_guide(agent_id: str, request: Request):
 @app.get("/api/published")
 def published_catalog():
     reg = BUNDLES_DIR / "registry.json"
-    return json.loads(reg.read_text(encoding="utf-8")) if reg.exists() else []
+    entries = json.loads(reg.read_text(encoding="utf-8")) if reg.exists() else []
+    # The Studio keeps the registry pointed at active versions, but the portal
+    # must not advertise a retired one even if the two ever drift.
+    return [e for e in entries if versions.is_servable(e["id"], e["version"])]
+
+
+@app.get("/api/version-states")
+def version_states():
+    """Per-version lifecycle state, so an installed device can retire a version
+    it already holds. Hiding a version from the store is not enough — a phone
+    that installed v5 before it was disabled would otherwise keep running it."""
+    return versions.read_states()
 
 
 @app.get("/bundles/{name}")
@@ -193,6 +255,12 @@ def bundle_file(name: str):
     path = (BUNDLES_DIR / name).resolve()
     if path.parent != BUNDLES_DIR.resolve() or not path.exists():
         raise HTTPException(404, "bundle not found")
+    # Enforce on the direct URL too: the store listing is a hint, this is the
+    # actual gate. A disabled version must not be installable by guessing.
+    parsed = versions.parse_bundle(path.name)
+    if parsed and not versions.is_servable(*parsed):
+        state = versions.state_of(*parsed)
+        raise HTTPException(410, f"'{path.name}' is {state} and is no longer available")
     telemetry.record(source="portal", event="bundle_download",
                      detail=name, bytes=path.stat().st_size, ok=1)
     return FileResponse(path, filename=name)
@@ -209,6 +277,18 @@ def model_file(name: str):
     telemetry.record(source="portal", event="model_download",
                      detail=name, bytes=path.stat().st_size, ok=1)
     return FileResponse(path, filename=name)
+
+
+@app.get("/adapters/{name}")
+def adapter_file(name: str):
+    """Serve a LoRA adapter to a phone. Same portal-first pattern as /models,
+    but there is no upstream fallback — adapters are ours, nobody mirrors them."""
+    path = (adapters.ADAPTERS_DIR / name).resolve()
+    if path.parent != adapters.ADAPTERS_DIR.resolve() or not path.exists():
+        raise HTTPException(404, "adapter not on portal")
+    telemetry.record(source="portal", event="adapter_download",
+                     detail=name, bytes=path.stat().st_size, ok=1)
+    return FileResponse(path, filename=name, media_type="application/octet-stream")
 
 
 # ---------------------------------------------------------------- native app APK
@@ -306,11 +386,16 @@ def retrieve(agent_id: str, manifest: dict, query: str) -> list[dict]:
     kb_path = AGENTS_DIR / agent_id / "kb.sqlite"
     if not kb_path.exists():
         return []
+    # Gate BEFORE embedding: a greeting should cost nothing at all, not an
+    # embedding plus a KB scan plus ~1000 prompt tokens of context.
+    ok, _reason = gating.should_retrieve(query)
+    if not ok:
+        return []
     rag = manifest.get("rag", {})
     qvec = embeddings.embed_query(query)
     return kbstore.search(kbstore.connect(kb_path), qvec,
                           top_k=int(rag.get("top_k", 4)),
-                          min_score=float(rag.get("min_score", 0.35)))
+                          min_score=float(rag.get("min_score", 0.45)))
 
 
 class ChatIn(BaseModel):
@@ -321,6 +406,13 @@ class ChatIn(BaseModel):
 @app.post("/api/chat")
 def api_chat(body: ChatIn):
     manifest = load_manifest(body.agent_id)
+    # A retired version must stop RUNNING, not just stop being installable —
+    # this device may have installed it before it was disabled.
+    vstate = versions.state_of(body.agent_id, manifest["version"])
+    if vstate != versions.ACTIVE:
+        raise HTTPException(
+            410, f"{manifest['name']} v{manifest['version']} has been {vstate} by the "
+                 f"Studio and can no longer be run. Check the store for a newer version.")
     if model_state(manifest) != "ready":
         raise HTTPException(409, "Model not on device yet — check the store panel for download progress.")
 
@@ -333,11 +425,15 @@ def api_chat(body: ChatIn):
         import time
         last_stats: dict = {}
         try:
-            needs_load = llm.status().get("model") != manifest["model"]["file"]
+            want_lora = adapter_path(manifest)
+            st = llm.status()
+            needs_load = (st.get("model") != manifest["model"]["file"]
+                          or st.get("adapter") != (str(want_lora) if want_lora else None))
             yield sse({"type": "status", "text": "loading model" if needs_load else "ready"})
             t_load = time.time()
             llm.ensure_model(manifest["model"]["file"],
-                             context=min(int(manifest["model"].get("context_length", 4096)), 8192))
+                             context=min(int(manifest["model"].get("context_length", 4096)), 8192),
+                             lora=want_lora)
             if needs_load:
                 telemetry.record(source="web-runtime", device_id="web-sim", event="model_load",
                                  ok=1, agent_id=body.agent_id, model_id=model_id,
@@ -389,6 +485,8 @@ def api_chat(body: ChatIn):
             telemetry.record(source="web-runtime", device_id="web-sim", event="chat", ok=1,
                              agent_id=body.agent_id, agent_version=manifest.get("version"),
                              model_id=model_id, kb_hits=kb_hits,
+                             adapter_id=(manifest.get("adapter") or {}).get("id")
+                                        if adapter_path(manifest) else None,
                              tokens=last_stats.get("tokens"),
                              tok_per_sec=last_stats.get("tok_per_sec"),
                              prefill_tokens=last_stats.get("prefill_tokens"))

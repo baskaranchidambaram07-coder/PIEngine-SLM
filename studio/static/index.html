@@ -138,7 +138,7 @@ const TOOL_TEMPLATES = [
     config:{method:'GET', url:'https://YOUR-DOMAIN.atlassian.net/wiki/rest/api/search?cql=text~"{query}"', headers:{Authorization:'Basic <base64 email:api_token>'}} },
 ];
 
-let state = { view:'agents', agent:null, tab:'details', catalog:[] };
+let state = { view:'agents', agent:null, tab:'details', catalog:[], adapters:[] };
 
 function nav(view) {
   state.view = view; state.agent = null;
@@ -324,6 +324,9 @@ async function newAgent() {
 async function openAgent(id) {
   state.agent = await api('/api/agents/' + id);
   state.catalog = await api('/api/catalog');
+  // tolerate an older Studio build with no adapter registry rather than
+  // blanking the whole editor
+  state.adapters = await api('/api/adapters').catch(() => []);
   state.tab = 'details';
   renderEditor();
 }
@@ -337,6 +340,7 @@ async function renderEditor() {
     <span class="back" onclick="state.agent=null;render()">← All agents</span>
     <div class="row"><div class="grow"><h1>${esc(a.name)}</h1>
       <div class="sub">${a.version ? 'Published v' + a.version : 'Draft'} · <code>${a.id}</code></div></div>
+      <button class="danger-ghost small" onclick="deleteAgent()">Delete agent</button>
     </div>
     <div class="tabs">
       ${['details','knowledge','tools','publish'].map(t =>
@@ -347,7 +351,7 @@ async function renderEditor() {
   if (state.tab === 'details') renderDetails(body);
   if (state.tab === 'knowledge') await renderKnowledge(body);
   if (state.tab === 'tools') renderTools(body);
-  if (state.tab === 'publish') renderPublish(body);
+  if (state.tab === 'publish') await renderPublish(body);
 }
 
 function renderDetails(body) {
@@ -372,6 +376,22 @@ function renderDetails(body) {
           <div class="info">${esc(c.notes)} · ${esc(c.license)}</div>
         </div>`).join('')}
     </div>
+    <div class="panel"><h3>Scenario tuning (LoRA adapter)</h3>
+      <div class="info" style="margin-bottom:10px">
+        An adapter changes how this model behaves — citation discipline, refusals,
+        tool-call shape — without changing which model the device downloads. Built
+        and gated with <code>python -m finetune</code>; only adapters that passed
+        their scorecard against this base model appear here.
+      </div>
+      ${adapterOptions(a).map(o => `
+        <div class="model-opt ${(a.adapter_id||'')===o.id?'sel':''}"
+             ${o.pickable ? `onclick="state.agent.adapter_id='${o.id}';renderEditor()"` : ''}>
+          <div class="row"><div class="grow"><span class="name">${esc(o.name)}</span></div>
+          ${o.size ? `<span class="chip">${o.size} MB</span>` : ''}
+          ${o.score ? `<span class="chip green">score ${o.score}</span>` : ''}</div>
+          <div class="info">${esc(o.info)}</div>
+        </div>`).join('')}
+    </div>
     <div class="panel"><h3>Generation & Retrieval</h3>
       <div class="grid3">
         <div><label>Temperature</label><input id="f-temp" type="number" step="0.05" value="${a.generation.temperature}"></div>
@@ -386,6 +406,30 @@ function renderDetails(body) {
     <button onclick="saveDetails()">Save agent</button>`;
 }
 
+function adapterOptions(a) {
+  const opts = [{ id:'', name:'Stock weights', size:0, score:null, pickable:true,
+                  info:'No adapter. The model behaves exactly as published upstream.' }];
+  for (const ad of (state.adapters || [])) {
+    // an adapter is only valid on the base it was trained against — applying it
+    // to another model produces garbage rather than an error, so the wrong ones
+    // are not offered at all
+    if (ad.base_model_id !== a.model_id || ad.status !== 'promoted') continue;
+    opts.push({
+      id: ad.id, name: ad.id, pickable: true,
+      size: Math.round(ad.size_bytes / 1048576),
+      score: ad.scorecard && ad.scorecard.score != null
+        ? Math.round(ad.scorecard.score * 100) + '%' : null,
+      info: `Trained for ${ad.agent}, promoted ${(ad.decided_at || '').slice(0, 10)}.`,
+    });
+  }
+  if (opts.length === 1) {
+    opts.push({ id:'__none__', name:'No promoted adapter for this model yet', pickable:false,
+                size:0, score:null,
+                info:'python -m finetune baseline / synth / pack → train on a GPU box → import → evaluate.' });
+  }
+  return opts;
+}
+
 async function saveDetails() {
   const a = state.agent;
   const payload = {
@@ -394,6 +438,7 @@ async function saveDetails() {
     scenario: $('f-scenario').value.trim(),
     system_prompt: $('f-prompt').value,
     model_id: a.model_id,
+    adapter_id: a.adapter_id || '',
     generation: { temperature:+$('f-temp').value, top_p:+$('f-topp').value, max_tokens:+$('f-maxtok').value },
     rag: { top_k:+$('f-topk').value, min_score:+$('f-minscore').value },
     tools: a.tools || [],
@@ -481,7 +526,8 @@ async function persistTools() {
   const a = state.agent;
   state.agent = await api('/api/agents/' + a.id, { method:'PUT', json:{
     name:a.name, description:a.description, scenario:a.scenario, system_prompt:a.system_prompt,
-    model_id:a.model_id, generation:a.generation, rag:a.rag, tools:a.tools }});
+    model_id:a.model_id, adapter_id:a.adapter_id||'', generation:a.generation,
+    rag:a.rag, tools:a.tools }});
 }
 
 async function addToolTemplate(i) {
@@ -505,9 +551,11 @@ async function removeTool(i) {
   await persistTools(); renderEditor();
 }
 
-function renderPublish(body) {
+async function renderPublish(body) {
   const a = state.agent;
   const model = state.catalog.find(c => c.id === a.model_id) || {};
+  let vers = { versions: [], published_version: null };
+  try { vers = await api(`/api/agents/${a.id}/versions`); } catch (e) { /* older build */ }
   body.innerHTML = `
     <div class="panel"><h3>Bundle preview — what the device downloads</h3>
       <table>
@@ -515,13 +563,77 @@ function renderPublish(body) {
         <tr><td style="color:var(--muted)">manifest.json</td><td>persona, system prompt, generation params, RAG config, ${(a.tools||[]).length} tool definition(s)</td></tr>
         <tr><td style="color:var(--muted)">kb.sqlite</td><td>${a.kb ? `${a.kb.docs} docs / ${a.kb.chunks} chunks with 384-dim embeddings` : 'empty'}</td></tr>
         <tr><td style="color:var(--muted)">Model (cached separately)</td><td>${esc(model.name||a.model_id)} — ${model.size_gb} GB GGUF, downloaded once per device, shared across agents</td></tr>
+        <tr><td style="color:var(--muted)">Scenario tuning</td><td>${a.adapter_id
+          ? esc(a.adapter_id) + ' — LoRA adapter, downloaded once and applied on top of the shared base model'
+          : 'none (stock weights)'}</td></tr>
         <tr><td style="color:var(--muted)">Embedder</td><td>bge-small-en-v1.5 ONNX (~130 MB) — shared across agents</td></tr>
       </table>
       <div style="margin-top:16px" class="row">
         <button class="green" onclick="publishAgent()">Publish v${a.version+1}</button>
         <span style="color:var(--muted);font-size:12px">Publishing makes this version available in the device Agent Store.</span>
       </div>
+    </div>
+
+    <div class="panel"><h3>Published versions</h3>
+      <div style="color:var(--muted);font-size:12px;margin-bottom:10px">
+        Disable takes a version out of the store and stops devices running it — reversible.
+        Delete removes its bundle from the server for good. Both act on a single version:
+        retiring an outdated v1 leaves later versions installable.
+      </div>
+      ${vers.versions.length ? `<table>
+        <tr><th>Version</th><th>State</th><th>Bundle</th><th>Size</th><th style="text-align:right">Actions</th></tr>
+        ${vers.versions.map(v => `<tr>
+          <td><b>v${v.version}</b> ${v.is_current ? '<span class="chip blue">in store</span>' : ''}</td>
+          <td>${v.state === 'active' ? '<span class="chip green">active</span>'
+                : v.state === 'disabled' ? '<span class="chip">disabled</span>'
+                : '<span class="chip">deleted</span>'}</td>
+          <td><code>${v.on_disk ? esc(v.bundle) : '—'}</code></td>
+          <td>${v.on_disk ? (v.bundle_bytes/1024).toFixed(0) + ' KB' : '—'}</td>
+          <td style="text-align:right">
+            ${v.state === 'active' ? `<button class="ghost small" onclick="setVersionState(${v.version},'disabled')">Disable</button>` : ''}
+            ${v.state === 'disabled' ? `<button class="ghost small" onclick="setVersionState(${v.version},'active')">Enable</button>` : ''}
+            ${v.state !== 'deleted' ? `<button class="danger-ghost small" onclick="deleteVersion(${v.version})">Delete</button>` : ''}
+          </td></tr>`).join('')}
+      </table>` : `<div class="empty">No versions published yet.</div>`}
     </div>`;
+}
+
+async function setVersionState(version, next) {
+  const a = state.agent;
+  if (next === 'disabled' &&
+      !confirm(`Disable ${a.name} v${version}?\n\nIt leaves the store and any device running it stops. You can re-enable it later.`)) return;
+  try {
+    const res = await api(`/api/agents/${a.id}/versions/${version}/state`,
+                          { method:'POST', json:{ state: next } });
+    toast(res.published_version
+      ? `v${version} ${next === 'active' ? 'enabled' : 'disabled'} — store now serves v${res.published_version}`
+      : `v${version} disabled — nothing left in the store for this agent`);
+    renderEditor();
+  } catch (e) { toast('Failed: ' + e.message, true); }
+}
+
+async function deleteVersion(version) {
+  const a = state.agent;
+  if (!confirm(`Delete ${a.name} v${version}?\n\nIts bundle is removed from the server permanently. This cannot be undone.`)) return;
+  try {
+    const res = await api(`/api/agents/${a.id}/versions/${version}`, { method:'DELETE' });
+    toast(res.published_version
+      ? `v${version} deleted — store now serves v${res.published_version}`
+      : `v${version} deleted — nothing left in the store for this agent`);
+    renderEditor();
+  } catch (e) { toast('Delete failed: ' + e.message, true); }
+}
+
+async function deleteAgent() {
+  const a = state.agent;
+  if (!confirm(`Delete the agent "${a.name}" entirely?\n\nEvery published bundle is removed from the server and it disappears from the store. This cannot be undone.`)) return;
+  try {
+    const res = await api(`/api/agents/${a.id}`, { method:'DELETE' });
+    const n = (res.bundles_removed || []).length;
+    toast(`Deleted ${a.name}${n ? ` and ${n} published bundle${n > 1 ? 's' : ''}` : ''}`);
+    state.agent = null;
+    render();
+  } catch (e) { toast('Delete failed: ' + e.message, true); }
 }
 
 async function publishAgent() {

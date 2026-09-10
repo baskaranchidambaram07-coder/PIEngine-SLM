@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from core import chunking, embeddings, kbstore, telemetry
+from core import adapters, chunking, embeddings, kbstore, telemetry, versions
 from core.catalog import MODEL_CATALOG, get_model
 from core.paths import BUNDLES_DIR, MODELS_DIR, ROOT
 
@@ -93,7 +93,7 @@ def save_agent(conn: sqlite3.Connection, agent_id: str, cfg: dict, version: int 
 # ---------------------------------------------------------------- models
 
 DEFAULT_GENERATION = {"temperature": 0.7, "top_p": 0.8, "max_tokens": 768}
-DEFAULT_RAG = {"top_k": 4, "min_score": 0.35}
+DEFAULT_RAG = {"top_k": 4, "min_score": 0.45}
 
 
 class AgentIn(BaseModel):
@@ -102,6 +102,9 @@ class AgentIn(BaseModel):
     scenario: str = ""
     system_prompt: str = ""
     model_id: str = "qwen3-1.7b-q4_k_m"
+    # A promoted LoRA adapter from finetune/ — behaviour on top of the shared
+    # base model. Empty means stock weights.
+    adapter_id: str = ""
     generation: dict = DEFAULT_GENERATION
     rag: dict = DEFAULT_RAG
     tools: list[dict] = []
@@ -177,12 +180,29 @@ def update_agent(agent_id: str, body: AgentIn):
 
 @app.delete("/api/agents/{agent_id}")
 def delete_agent(agent_id: str):
+    """Remove the agent from the server entirely.
+
+    Works whether the agent was ever published or is still in the creation
+    journey. Previously this deleted only the database row and the KB, leaving
+    every published bundle on disk and still listed in the registry — so a
+    "deleted" agent stayed installable from the store. It now takes the
+    published artifacts with it.
+    """
     conn = db()
     load_agent(conn, agent_id)
+
+    removed = []
+    for v in versions.bundle_versions(agent_id):
+        path = BUNDLES_DIR / versions.bundle_name(agent_id, v)
+        path.unlink(missing_ok=True)
+        removed.append(v)
+    write_registry([r for r in read_registry() if r["id"] != agent_id])
+    versions.forget_agent(agent_id)
+
     conn.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
     conn.commit()
     kb_path(agent_id).unlink(missing_ok=True)
-    return {"ok": True}
+    return {"ok": True, "agent_id": agent_id, "bundles_removed": sorted(removed, reverse=True)}
 
 
 # ---------------------------------------------------------------- knowledge base
@@ -280,6 +300,24 @@ def publish(agent_id: str):
         "embedder": {"id": embeddings.EMBEDDER_ID, "dim": embeddings.EMBEDDING_DIM},
     }
 
+    # A tuned agent carries its adapter descriptor, not the adapter file: the
+    # device fetches ~30 MB once from /adapters/<file> and keeps using the base
+    # GGUF it already has. Only a PROMOTED adapter is allowed through — see
+    # core/adapters.manifest_entry.
+    adapter_id = (cfg.get("adapter_id") or "").strip()
+    if adapter_id:
+        try:
+            entry = adapters.manifest_entry(adapter_id)
+        except (KeyError, ValueError) as exc:
+            # str(KeyError) wraps the message in quotes; args[0] is the message
+            raise HTTPException(400, exc.args[0] if exc.args else str(exc))
+        if entry["base_model_id"] != model["id"]:
+            raise HTTPException(
+                400, f"adapter '{adapter_id}' was trained against "
+                     f"{entry['base_model_id']}, but this agent runs {model['id']} — "
+                     f"applying a LoRA to the wrong base produces garbage, not an error")
+        manifest["adapter"] = entry
+
     bundle_name = f"{agent_id}-v{version}.zip"
     bundle_file = BUNDLES_DIR / bundle_name
     with zipfile.ZipFile(bundle_file, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -292,7 +330,8 @@ def publish(agent_id: str):
         "id": agent_id, "name": cfg["name"], "description": cfg.get("description", ""),
         "version": version, "published_at": manifest["published_at"],
         "bundle": bundle_name, "bundle_bytes": bundle_file.stat().st_size,
-        "model": manifest["model"], "kb": kb_stats, "tools": len(manifest["tools"]),
+        "model": manifest["model"], "adapter": manifest.get("adapter"),
+        "kb": kb_stats, "tools": len(manifest["tools"]),
     })
     registry_path().write_text(json.dumps(registry, indent=2), encoding="utf-8")
 
@@ -300,9 +339,114 @@ def publish(agent_id: str):
     return {"ok": True, "version": version, "bundle": bundle_name}
 
 
+def write_registry(entries: list[dict]) -> None:
+    registry_path().write_text(json.dumps(entries, indent=2), encoding="utf-8")
+
+
+def registry_entry_from_bundle(agent_id: str, version: int) -> dict | None:
+    """Rebuild a registry entry from a published bundle's own manifest.
+
+    Promoting an older version after the current one is retired needs that
+    version's metadata as it was at publish time — which lives in the bundle,
+    not in the (since-edited) agent config.
+    """
+    path = BUNDLES_DIR / versions.bundle_name(agent_id, version)
+    if not path.exists():
+        return None
+    with zipfile.ZipFile(path) as zf:
+        m = json.loads(zf.read("manifest.json"))
+    rag = m.get("rag", {})
+    return {
+        "id": agent_id, "name": m.get("name", agent_id),
+        "description": m.get("description", ""),
+        "version": version, "published_at": m.get("published_at", ""),
+        "bundle": path.name, "bundle_bytes": path.stat().st_size,
+        "model": m.get("model"), "adapter": m.get("adapter"),
+        "kb": {"docs": rag.get("docs", 0), "chunks": rag.get("chunks", 0)},
+        "tools": len(m.get("tools", [])),
+    }
+
+
+def reconcile_registry(agent_id: str) -> int | None:
+    """Point the store at this agent's newest ACTIVE version, or drop it.
+
+    Called after any disable/enable/delete so devices never see a retired
+    version. Returns the version now published, or None if the agent no longer
+    has one.
+    """
+    registry = [r for r in read_registry() if r["id"] != agent_id]
+    newest = versions.newest_active(agent_id)
+    if newest is not None:
+        entry = registry_entry_from_bundle(agent_id, newest)
+        if entry:
+            registry.append(entry)
+        else:
+            newest = None
+    write_registry(registry)
+    return newest
+
+
+@app.get("/api/agents/{agent_id}/versions")
+def list_versions(agent_id: str):
+    conn = db()
+    load_agent(conn, agent_id)  # 404 if the agent is gone
+    current = next((r["version"] for r in read_registry() if r["id"] == agent_id), None)
+    return {"agent_id": agent_id, "published_version": current,
+            "versions": versions.describe(agent_id, current)}
+
+
+class VersionState(BaseModel):
+    state: str  # "active" | "disabled"
+
+
+@app.post("/api/agents/{agent_id}/versions/{version}/state")
+def set_version_state(agent_id: str, version: int, body: VersionState):
+    """Disable (or re-enable) one published version.
+
+    A disabled version stays on disk and can be re-enabled; it is simply not
+    servable and cannot be run on device or web.
+    """
+    conn = db()
+    load_agent(conn, agent_id)
+    if body.state not in ("active", "disabled"):
+        raise HTTPException(400, "state must be 'active' or 'disabled'")
+    if versions.state_of(agent_id, version) == versions.DELETED:
+        raise HTTPException(409, f"v{version} is deleted — deletion is not reversible")
+    if version not in versions.bundle_versions(agent_id):
+        raise HTTPException(404, f"v{version} has no bundle on disk")
+
+    versions.set_state(agent_id, version, body.state)
+    now_published = reconcile_registry(agent_id)
+    return {"ok": True, "agent_id": agent_id, "version": version,
+            "state": body.state, "published_version": now_published}
+
+
+@app.delete("/api/agents/{agent_id}/versions/{version}")
+def delete_version(agent_id: str, version: int):
+    """Delete one published version: its bundle is removed from the server.
+
+    The agent and its other versions are untouched — deleting an outdated v1
+    leaves v9 installable. If the deleted version was the published one, the
+    newest remaining active version is promoted in its place.
+    """
+    conn = db()
+    load_agent(conn, agent_id)
+    if version not in versions.known_versions(agent_id):
+        raise HTTPException(404, f"'{agent_id}' has no v{version}")
+
+    (BUNDLES_DIR / versions.bundle_name(agent_id, version)).unlink(missing_ok=True)
+    versions.set_state(agent_id, version, versions.DELETED)
+    now_published = reconcile_registry(agent_id)
+    return {"ok": True, "agent_id": agent_id, "deleted_version": version,
+            "published_version": now_published}
+
+
 @app.get("/api/published")
 def published():
-    return read_registry()
+    # Defensive: reconcile keeps this true, but never advertise a version whose
+    # bundle has gone missing or been retired underneath us.
+    return [r for r in read_registry()
+            if versions.is_servable(r["id"], r["version"])]
 
 
 @app.get("/bundles/{name}")
@@ -311,6 +455,29 @@ def download_bundle(name: str):
     if path.parent != BUNDLES_DIR.resolve() or not path.exists():
         raise HTTPException(404, "bundle not found")
     return FileResponse(path, filename=name)
+
+
+# ---------------------------------------------------------------- adapters
+# Scenario fine-tunes, produced by the finetune/ pipeline. The Studio only
+# reads this registry: adapters are imported and gated from the CLI, because
+# promotion depends on a scorecard that takes minutes to produce.
+
+@app.get("/api/adapters")
+def list_adapters(base_model_id: str | None = None, promoted_only: bool = False):
+    rows = adapters.load()
+    if base_model_id:
+        rows = [a for a in rows if a["base_model_id"] == base_model_id]
+    if promoted_only:
+        rows = [a for a in rows if a["status"] == "promoted"]
+    return rows
+
+
+@app.get("/adapters/{name}")
+def download_adapter(name: str):
+    path = (adapters.ADAPTERS_DIR / name).resolve()
+    if path.parent != adapters.ADAPTERS_DIR.resolve() or not path.exists():
+        raise HTTPException(404, "adapter not found")
+    return FileResponse(path, filename=name, media_type="application/octet-stream")
 
 
 # ---------------------------------------------------------------- governance
