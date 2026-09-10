@@ -1,6 +1,7 @@
 // Chat orchestrator — the on-device equivalent of runtime/app.py's /api/chat:
 // retrieve → prompt → stream → tool rounds. Emits UI-ready events.
 import { search, SearchHit } from './kb';
+import { shouldRetrieve } from './gating';
 import {
   buildPrompt, buildSystemPrompt, ChatTurn, CompletionStats,
   embedText, ensureChatModel, streamCompletion,
@@ -28,12 +29,20 @@ export async function runChat(
     const userQuery = history[history.length - 1]?.content ?? '';
     await log(`chat: query "${userQuery.slice(0, 60)}" agent=${agentId}`);
 
-    onEvent({ type: 'status', text: 'Searching knowledge base…' });
     const rag = manifest.rag || {};
-    const qvec = await embedText(userQuery, true);
-    await log('chat: query embedded');
-    const hits = await search(agentId, qvec, Number(rag.top_k ?? 4), Number(rag.min_score ?? 0.35));
-    if (hits.length) onEvent({ type: 'sources', items: hits });
+    // Gate BEFORE embedding: a greeting should cost nothing at all — not an
+    // embedding (~200ms on device), not a KB scan, not ~1000 prompt tokens.
+    const [needsKb, gateReason] = shouldRetrieve(userQuery);
+    let hits: SearchHit[] = [];
+    if (needsKb) {
+      onEvent({ type: 'status', text: 'Searching knowledge base…' });
+      const qvec = await embedText(userQuery, true);
+      await log('chat: query embedded');
+      hits = await search(agentId, qvec, Number(rag.top_k ?? 4), Number(rag.min_score ?? 0.45));
+      if (hits.length) onEvent({ type: 'sources', items: hits });
+    } else {
+      await log(`chat: KB skipped (${gateReason}) — no embedding, no search`);
+    }
 
     let contextBlock = '';
     if (hits.length) {
@@ -47,7 +56,8 @@ export async function runChat(
     const tLoad = Date.now();
     const ctx = await ensureChatModel(manifest.model.file,
       s => onEvent({ type: 'status', text: s }),
-      Number(manifest.model.size_bytes) || undefined);
+      Number(manifest.model.size_bytes) || undefined,
+      manifest.adapter ? { file: manifest.adapter.file, scale: manifest.adapter.scale } : null);
     const loadMs = Date.now() - tLoad;
     if (loadMs > 400) {  // a real load, not a warm-cache reuse
       reportTelemetry({ event: 'model_load', agent_id: agentId, model_id: modelId,

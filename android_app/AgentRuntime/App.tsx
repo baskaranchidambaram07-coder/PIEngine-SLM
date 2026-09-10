@@ -118,6 +118,13 @@ export default function App() {
     if (!agent || busy) return;
     const text = input.trim();
     if (!text) return;
+    // A version retired in the Studio must stop running here too — this device
+    // may have installed it before it was disabled.
+    if (agent.versionState && agent.versionState !== 'active') {
+      setMsgs(m => [...m, { id: nextId(), kind: 'bot',
+        text: `${agent.name} v${agent.version} has been ${agent.versionState} by the Studio and can no longer be run. Open the store to install a newer version.` }]);
+      return;
+    }
     setInput('');
     setBusy(true);
 

@@ -6,12 +6,64 @@ import ReactNativeBlobUtil from 'react-native-blob-util';
 import { unzip } from 'react-native-zip-archive';
 import {
   AGENTS_DIR, DEFAULT_PORTAL, DISCOVERY_TIMEOUT_MS, DISCOVERY_URLS,
-  EMBEDDER_FILE, EMBEDDER_URL, MODELS_DIR, PORTAL_HEADERS, PORTAL_PROBE_MS,
+  ADAPTERS_DIR, EMBEDDER_FILE, EMBEDDER_URL, MODELS_DIR, PORTAL_HEADERS, PORTAL_PROBE_MS,
 } from './config';
 import { log } from './logger';
 
 const PORTAL_KEY = 'portal_url_v1';
+const VERSION_STATE_KEY = 'version_states_v1';
 const fs = ReactNativeBlobUtil.fs;
+
+// --------------------------------------------------------- version lifecycle
+// The Studio can disable or delete one published VERSION of an agent. Dropping
+// it from the store is not enough on its own: a handset that installed v5
+// before it was disabled still holds a working copy and would keep running it.
+// So the app caches the state map and refuses to run a retired version. The
+// cache is persisted because the app must keep working offline — the last
+// known state is used until the portal can be reached again.
+
+export type VersionStates = Record<string, Record<string, { state: string } | string>>;
+
+let versionStates: VersionStates | null = null;
+
+function stateFrom(map: VersionStates, id: string, version: number): string {
+  const raw = map?.[id]?.[String(version)];
+  if (!raw) return 'active';
+  return typeof raw === 'string' ? raw : (raw.state || 'active');
+}
+
+async function loadVersionStates(): Promise<VersionStates> {
+  if (versionStates) return versionStates;
+  try {
+    const cached = await AsyncStorage.getItem(VERSION_STATE_KEY);
+    versionStates = cached ? JSON.parse(cached) : {};
+  } catch {
+    versionStates = {};
+  }
+  return versionStates!;
+}
+
+/** Pull the current state map from the portal; keeps the cache on failure. */
+export async function refreshVersionStates(): Promise<VersionStates> {
+  try {
+    const base = await resolvePortalUrl();
+    const resp = await fetch(`${base}/api/version-states`, { headers: PORTAL_HEADERS });
+    if (!resp.ok) throw new Error(`portal returned ${resp.status}`);
+    versionStates = (await resp.json()) || {};
+    await AsyncStorage.setItem(VERSION_STATE_KEY, JSON.stringify(versionStates));
+    await log(`portal: version states synced (${Object.keys(versionStates!).length} agents)`);
+  } catch (e: any) {
+    // An older portal has no such endpoint, and an offline phone has no portal
+    // at all. Neither should block chat — fall back to the last known map.
+    await log(`portal: version state sync skipped (${String(e?.message || e).slice(0, 80)})`);
+    await loadVersionStates();
+  }
+  return versionStates!;
+}
+
+export async function versionStateOf(id: string, version: number): Promise<string> {
+  return stateFrom(await loadVersionStates(), id, version);
+}
 
 export async function getPortalUrl(): Promise<string> {
   return (await AsyncStorage.getItem(PORTAL_KEY)) || DEFAULT_PORTAL;
@@ -86,6 +138,10 @@ export type StoreEntry = {
   bundle: string;
   bundle_bytes: number;
   model: { id: string; name: string; file: string; download_url: string; size_gb: number };
+  // Present only for a fine-tuned agent. Served by the portal, not by a CDN —
+  // adapters are ours and nobody mirrors them.
+  adapter?: { id: string; file: string; size_bytes: number; sha256: string;
+              base_model_id: string; scale: number } | null;
   kb: { docs: number; chunks: number };
   tools: number;
   installed_version?: number;
@@ -96,6 +152,9 @@ export async function fetchStore(): Promise<StoreEntry[]> {
   const resp = await fetch(`${base}/api/published`, { headers: PORTAL_HEADERS });
   if (!resp.ok) throw new Error(`portal returned ${resp.status}`);
   const published: StoreEntry[] = await resp.json();
+  // Same round-trip that refreshes the store also refreshes which versions are
+  // still allowed to run, so a disable reaches the handset on its next sync.
+  await refreshVersionStates();
   const installed = await listInstalled();
   for (const p of published) {
     const local = installed.find(i => i.id === p.id);
@@ -112,6 +171,9 @@ export type InstalledAgent = {
   manifest: any;
   modelReady: boolean;
   embedderReady: boolean;
+  adapterReady: boolean;
+  /** 'active' | 'disabled' | 'deleted' — a retired version must not run. */
+  versionState: string;
 };
 
 export async function listInstalled(): Promise<InstalledAgent[]> {
@@ -131,6 +193,9 @@ export async function listInstalled(): Promise<InstalledAgent[]> {
         manifest,
         modelReady: await fs.exists(`${MODELS_DIR}/${manifest.model.file}`),
         embedderReady: await fs.exists(`${MODELS_DIR}/${EMBEDDER_FILE}`),
+        adapterReady: !manifest.adapter ||
+          await fs.exists(`${ADAPTERS_DIR}/${manifest.adapter.file}`),
+        versionState: stateFrom(await loadVersionStates(), id, manifest.version),
       });
     } catch {}
   }
@@ -254,7 +319,21 @@ export async function installAgent(entry: StoreEntry, onProgress?: Progress): Pr
       [EMBEDDER_URL, `${base}/models/${EMBEDDER_FILE}`],
       embDest, 'Embedder (35 MB)', true, onProgress);
   }
-  await log(`install complete: ${entry.id} v${entry.version}`);
+  // 4. LoRA adapter, if this agent is fine-tuned. Small, and portal-only:
+  // there is no CDN fallback because the adapter exists nowhere else.
+  if (entry.adapter) {
+    await fs.mkdir(ADAPTERS_DIR).catch(() => {});
+    const adDest = `${ADAPTERS_DIR}/${entry.adapter.file}`;
+    if (!(await fs.exists(adDest))) {
+      const mb = Math.round(entry.adapter.size_bytes / 1048576);
+      await downloadWithFallback(
+        [`${base}/adapters/${encodeURIComponent(entry.adapter.file)}`],
+        adDest, `Tuning for ${entry.name} (${mb} MB)`, true, onProgress);
+    }
+  }
+
+  await log(`install complete: ${entry.id} v${entry.version}` +
+            (entry.adapter ? ` (adapter ${entry.adapter.id})` : ''));
 }
 
 export async function uninstallAgent(id: string): Promise<void> {
