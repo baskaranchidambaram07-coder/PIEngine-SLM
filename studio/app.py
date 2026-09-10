@@ -387,6 +387,12 @@ def cache_model_here(model_id: str):
         return {"ok": True, "state": "already downloaded"}
     if not entry.get("download_url"):
         raise HTTPException(400, "this model has no source URL (it was uploaded)")
+    # Refuse up front rather than filling the disk and dying part-way. 507 is
+    # Insufficient Storage — the accurate status for this.
+    short = downloads.space_shortfall(MODELS_DIR, int(entry.get("size_bytes") or 0))
+    if short:
+        raise HTTPException(507, downloads.describe_shortfall(
+            short, int(entry["size_bytes"]), MODELS_DIR))
     _start_model_download(entry)
     return {"ok": True, "state": "downloading"}
 

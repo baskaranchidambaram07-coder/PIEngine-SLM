@@ -137,6 +137,13 @@ def _download_model(model: dict) -> None:
     f = model["file"]
     prog = _model_downloads.setdefault(f, {"total": 0, "done": 0, "error": None})
     tmp = MODELS_DIR / (f + ".part")
+    # Check before writing a byte: a multi-GB model that fills the disk takes
+    # more than itself down with it — in-flight SQLite writes included.
+    need = int(model.get("size_bytes") or 0)
+    short = downloads.space_shortfall(MODELS_DIR, need)
+    if short:
+        prog["error"] = downloads.describe_shortfall(short, need, MODELS_DIR)
+        return
     try:
         with requests.get(model["download_url"], stream=True, timeout=60) as r:
             r.raise_for_status()
@@ -156,6 +163,12 @@ def _download_adapter(adapter: dict) -> None:
     f = adapter["file"]
     prog = _model_downloads.setdefault(f, {"total": 0, "done": 0, "error": None})
     tmp = adapters.ADAPTERS_DIR / (f + ".part")
+    need = int(adapter.get("size_bytes") or 0)
+    short = downloads.space_shortfall(adapters.ADAPTERS_DIR.parent, need)
+    if short:
+        prog["error"] = downloads.describe_shortfall(short, need,
+                                                     adapters.ADAPTERS_DIR.parent)
+        return
     try:
         adapters.ADAPTERS_DIR.mkdir(parents=True, exist_ok=True)
         url = adapter.get("download_url") or f"{STUDIO_URL}/adapters/{f}"

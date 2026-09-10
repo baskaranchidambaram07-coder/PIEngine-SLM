@@ -6,7 +6,44 @@ so both need the same cleanup on failure — kept here rather than triplicated.
 """
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
+
+# Headroom left free after a download. The box also needs room for SQLite
+# writes, logs and gradle scratch; filling the disk to the last byte corrupts
+# those rather than merely failing the download.
+SPACE_MARGIN_BYTES = 1 << 30   # 1 GB
+
+
+def space_shortfall(dest_dir: Path, needed_bytes: int,
+                    margin: int = SPACE_MARGIN_BYTES) -> int:
+    """Bytes by which `dest_dir` is short of holding `needed_bytes` + margin.
+
+    0 means there is room. Checking up front turns "ran the disk to zero, then
+    failed at 64%" into an immediate, explainable refusal — and a full disk
+    does not just lose the download, it can corrupt an in-flight SQLite write.
+
+    An unknown size (0) or an unreadable filesystem returns 0: refusing a
+    download because we could not measure it would be worse than attempting it,
+    since the failure path now cleans up after itself.
+    """
+    if needed_bytes <= 0:
+        return 0
+    try:
+        free = shutil.disk_usage(dest_dir).free
+    except OSError:
+        return 0
+    return max(0, (needed_bytes + margin) - free)
+
+
+def describe_shortfall(short: int, needed_bytes: int, dest_dir: Path) -> str:
+    try:
+        free = shutil.disk_usage(dest_dir).free
+    except OSError:
+        free = 0
+    return (f"not enough disk space: needs {needed_bytes / 1e9:.2f} GB plus "
+            f"{SPACE_MARGIN_BYTES / 1e9:.0f} GB headroom, but only "
+            f"{free / 1e9:.2f} GB is free — {short / 1e9:.2f} GB short")
 
 
 def discard_partial(tmp: Path) -> int:
