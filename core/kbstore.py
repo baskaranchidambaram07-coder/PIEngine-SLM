@@ -4,11 +4,21 @@ The same file format ships inside the agent bundle and is readable on-device
 (SQLite runs everywhere, embeddings are raw float32 blobs). Search is
 brute-force cosine over normalized vectors — for on-device KBs of a few
 thousand chunks this is single-digit milliseconds and needs no index.
+
+Two things keep the scan cheap as KBs grow:
+  * the vector matrix is cached in memory per KB file, so repeated queries
+    skip the table scan and the blob decode entirely;
+  * chunk text is never read while scoring — only the top_k winners are
+    fetched by id.
+The cache is keyed on the file's mtime+size, so a KB rebuilt by the Studio or
+a kb.sqlite replaced by a bundle install is picked up without a restart.
 """
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -36,12 +46,66 @@ CREATE TABLE IF NOT EXISTS kb_meta (
 );
 """
 
+# How many distinct KB files keep a cached matrix. 384 dims x 4 bytes is
+# ~1.5 KB per chunk, so a few thousand chunks per agent stays in single-digit MB.
+CACHE_MAX_FILES = 8
+
+# path -> (stamp, chunk_ids, matrix)
+_cache: OrderedDict[str, tuple[tuple[int, int], list[int], np.ndarray]] = OrderedDict()
+
 
 def connect(path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
     return conn
+
+
+def _db_path(conn: sqlite3.Connection) -> str:
+    for _seq, name, file in conn.execute("PRAGMA database_list"):
+        if name == "main":
+            return file or ""
+    return ""
+
+
+def _stamp(path: str) -> tuple[int, int] | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def invalidate(conn: sqlite3.Connection) -> None:
+    """Drop the cached matrix for this KB (called after every write)."""
+    _cache.pop(_db_path(conn), None)
+
+
+def _vectors(conn: sqlite3.Connection) -> tuple[list[int], np.ndarray]:
+    """Chunk ids and their normalized vectors, cached per KB file."""
+    path = _db_path(conn)
+    stamp = _stamp(path) if path else None
+
+    if stamp is not None:
+        hit = _cache.get(path)
+        if hit is not None and hit[0] == stamp:
+            _cache.move_to_end(path)
+            return hit[1], hit[2]
+
+    rows = conn.execute("SELECT id, embedding FROM chunks ORDER BY id").fetchall()
+    ids = [r[0] for r in rows]
+    if rows:
+        mat = np.frombuffer(b"".join(r[1] for r in rows), dtype=np.float32)
+        mat = mat.reshape(len(rows), EMBEDDING_DIM)
+    else:
+        mat = np.empty((0, EMBEDDING_DIM), dtype=np.float32)
+
+    if stamp is not None:
+        _cache[path] = (stamp, ids, mat)
+        _cache.move_to_end(path)
+        while len(_cache) > CACHE_MAX_FILES:
+            _cache.popitem(last=False)
+    return ids, mat
 
 
 def add_document(conn: sqlite3.Connection, name: str, chunks: list[str],
@@ -58,12 +122,14 @@ def add_document(conn: sqlite3.Connection, name: str, chunks: list[str],
         rows,
     )
     conn.commit()
+    invalidate(conn)
     return doc_id
 
 
 def delete_document(conn: sqlite3.Connection, doc_id: int) -> None:
     conn.execute("DELETE FROM docs WHERE id = ?", (doc_id,))
     conn.commit()
+    invalidate(conn)
 
 
 def list_documents(conn: sqlite3.Connection) -> list[dict]:
@@ -86,20 +152,37 @@ def stats(conn: sqlite3.Connection) -> dict:
 
 def search(conn: sqlite3.Connection, query_vec: np.ndarray, top_k: int = 4,
            min_score: float = 0.0) -> list[dict]:
-    rows = conn.execute("SELECT id, doc_name, chunk_index, text, embedding FROM chunks").fetchall()
-    if not rows:
+    if top_k <= 0:
         return []
-    mat = np.frombuffer(b"".join(r[4] for r in rows), dtype=np.float32).reshape(len(rows), EMBEDDING_DIM)
+    ids, mat = _vectors(conn)
+    if not ids:
+        return []
+
     scores = mat @ query_vec.astype(np.float32)
-    order = np.argsort(-scores)[:top_k]
+    k = min(top_k, len(ids))
+    top = np.argpartition(-scores, k - 1)[:k]
+    top = top[np.argsort(-scores[top])]
+
+    winners = [(ids[int(i)], float(scores[int(i)])) for i in top
+               if float(scores[int(i)]) >= min_score]
+    if not winners:
+        return []
+
+    placeholders = ",".join("?" * len(winners))
+    rows = {
+        r[0]: r for r in conn.execute(
+            f"SELECT id, doc_name, chunk_index, text FROM chunks WHERE id IN ({placeholders})",
+            [w[0] for w in winners],
+        )
+    }
+
     results = []
-    for idx in order:
-        score = float(scores[idx])
-        if score < min_score:
-            continue
-        r = rows[int(idx)]
+    for chunk_id, score in winners:
+        row = rows.get(chunk_id)
+        if row is None:
+            continue  # chunk deleted by another process since the matrix was cached
         results.append({
-            "chunk_id": r[0], "doc_name": r[1], "chunk_index": r[2],
-            "text": r[3], "score": round(score, 4),
+            "chunk_id": row[0], "doc_name": row[1], "chunk_index": row[2],
+            "text": row[3], "score": round(score, 4),
         })
     return results
