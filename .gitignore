@@ -67,3 +67,11 @@ Thumbs.db
 # Templates are committed as *.example; copy and fill them in locally.
 android_app/AgentRuntime/src/config.local.ts
 scripts/start_studio_tunnel.cmd
+
+# Fine-tuning artifacts.
+# reports/ holds model ANSWERS over the real knowledge base — customer content,
+# never commit it. jobs/ and datasets/*.jsonl are regenerable build output
+# (the *-dataset.json provenance files are small and are kept).
+finetune/reports/
+finetune/jobs/
+finetune/datasets/*.jsonl

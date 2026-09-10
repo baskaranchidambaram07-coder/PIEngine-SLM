@@ -87,7 +87,7 @@ This product is an assessment of whether that is *deployable*, not just possible
 | BO-3 | Distribute agents to phones **without an app store** | Install from an internal portal URL, including multi-GB models | **Met** — portal serves bundles, models and the APK |
 | BO-4 | Give the organisation **governance visibility without surveillance** | Usage, performance and reliability visible; message content provably never collected | **Met** — metadata-only telemetry, content keys stripped in code |
 | BO-5 | Establish **feasibility limits** on real hardware | Documented tokens/sec and model-size ceiling per device class | **Met** — measured; a hard device ceiling was found and diagnosed |
-| BO-6 | Provide a **specialisation path** beyond prompting | A fine-tuning pipeline that improves citation discipline and tool accuracy | **Partial** — pipeline written, not executed (no GPU) |
+| BO-6 | Provide a **specialisation path** beyond prompting | A requirement-driven fine-tuning pipeline: state the behaviour, generate its data, gate the result | **Partial** — every stage built and exercised except the gradient step itself (no GPU on this server); adapters ship as ~30 MB increments on the shared base model |
 
 ---
 
@@ -322,11 +322,22 @@ the handset.
 
 ### BC-11 — Model specialisation pipeline
 
+Requirement-driven: a fine-tune starts from a written, testable statement of
+the behaviour required, and the same statement generates its training data,
+grades the result and decides whether it may ship. Design and rationale in
+[`docs/finetuning.md`](finetuning.md).
+
 | ID | Requirement | As implemented | Status |
 |---|---|---|---|
-| FR-11.1 | Build training data from a live agent | Dataset builder combines hand-written behaviour seeds (citation discipline, refusal, scope control), KB-grounded pairs generated from the agent's own chunks, and optional teacher distillation via any OpenAI-compatible endpoint | Built (runs without a GPU) |
-| FR-11.2 | Train a scenario adapter | QLoRA training script | Built, **never executed** |
-| FR-11.3 | Ship the result | Merge-and-export to GGUF for the catalog | Built, **never executed** |
+| FR-11.1 | State the requirement in a testable form | One YAML per tune: each requirement carries a statement, a rationale, held-out probes with automatic checks, a pass-rate target and a weight. A requirement without probes fails to load, and requirement kinds are behavioural by construction — there is no kind that can express a fact | Verified |
+| FR-11.2 | Establish what actually needs training | `baseline` scores the stock model against the spec through the shipped chat endpoint before any data is generated; requirements already at target are reported and excluded from the dataset | Verified |
+| FR-11.3 | Generate training data without exposing customer content | Contexts rendered from templated surrogate documents with a randomised entity cast per example; every generated answer is screened by the same checks that will grade the model, and failures are discarded (rejection sampling) rather than repaired | Verified — 308 examples generated and accepted |
+| FR-11.4 | Prove no customer content reached the training set | The dataset gate blocks on any capitalised term present in the agent's real knowledge base and absent from the synthesiser's own vocabulary, alongside leakage, duplication, balance and length checks | Verified — gate blocked three real defects on first run |
+| FR-11.5 | Train a scenario adapter | QLoRA (4-bit base, LoRA r=16) driven by a job config; loss is taken on the assistant turn only, so retrieved context is never learned as text | Built, **never executed** — no GPU on the platform server |
+| FR-11.6 | Make the GPU stage portable | Self-contained job pack (dataset, config, training script, `run.sh`, Colab notebook) that runs unchanged on a free T4, an Ubuntu box or a cloud spot instance; only surrogate text and hyperparameters leave the platform | Verified — pack builds (0.1 MB) |
+| FR-11.7 | Ship the result as an increment, not a replacement | The deliverable is a LoRA adapter (~20-60 MB) applied on top of the base model every agent already shares, rather than a second full model. Supported natively by both runtimes (`llama-server --lora`, `llama.rn lora_list`) | Built; adapter distribution and application wired end to end, untested against a real adapter |
+| FR-11.8 | Refuse to ship an unproven adapter | Promotion requires every requirement at its target, no regression on a suite that is never trained on, no latency blow-out, and a net improvement. The registry records the verdict and publishing rejects any adapter that is not `promoted`, or that was trained against a different base model | Verified — gate logic and registry lifecycle covered by `finetune/selftest.py` |
+| FR-11.9 | Keep the tuned population visible | Telemetry records which adapter answered each turn, so tuned and stock populations can be compared on real usage | Built |
 
 ---
 

@@ -51,6 +51,7 @@ the device. Concretely:
 | Landing page + light theme | working | `/welcome`, AI-Native light theme across both SPAs |
 | Portal URL auto-discovery | working | `GET /api/portal-url`; the app re-resolves and persists a new portal URL when its saved one stops answering |
 | Cloudflare named tunnel | implemented, not activated | `cloudflare/` renders and passes `cloudflared tunnel ingress validate`; **needs a domain to go live** |
+| Fine-tuning pipeline | built, GPU stage pending | requirement spec (5 requirements, 23 probes) scored against the running system — **stock model 78%**, and the harness reproduced three previously hand-found defects by name; 269 synthetic examples passing leakage/duplication/balance/length/**privacy** gates → job pack. Adapters ship as ~30 MB LoRA on the shared base, gated on a scorecard before publish |
 | Public repo | done | source only (~2.7 MB); weights, toolchains and runtime state excluded |
 
 ### Pending
@@ -59,12 +60,140 @@ the device. Concretely:
 |---|---|---|
 | 1 | **Activate the named tunnel** — permanent `studio.` / `portal.` hostnames | a Cloudflare account + a domain; then `cloudflare\setup.ps1` (§1c) |
 | 2 | **Qwen3-1.7B on the test handset** — init OOMs after weights load; 0.6B is that device's ceiling | root cause found (compute buffer driven by `n_ubatch`); needs a device with more headroom, or further batch tuning |
-| 3 | **Fine-tuning** (`finetune/`) — citation discipline, refusal behaviour, tool selection | no GPU on this server; QLoRA must run on a GPU box |
+| 3 | **Train the first adapter** — the pipeline around it is built and exercised (spec → synthesis → dataset gate → job pack, and the import/A-B/promotion path behind it); only the gradient step is missing | no GPU and ~4 GB free disk on this server; the job pack is built and runs unchanged on a Colab T4 or any 8 GB NVIDIA box ([`docs/finetuning.md`](docs/finetuning.md)) |
 | 4 | **iOS build** of the same RN app | needs a Mac or macOS CI runner |
 | 5 | **Production APK signing** | release currently uses the stock RN *debug* keystore — must be replaced before real distribution |
 | 6 | **Scale-out retrieval** — sqlite-vec + hybrid BM25/vector past ~10k chunks | not started |
 | 7 | **Bundle signing + encryption at rest, MDM distribution** | not started |
 | 8 | **Automated tests / CI** | none yet; verification to date is manual and end-to-end |
+
+---
+
+## 0a. Competitive landscape
+
+### Luxand LLM SDK — https://www.luxand.com/llm-sdk/
+
+The closest thing to us in market positioning, and the most useful reference
+point we have. Same core thesis: a local model inside the app, nothing sent
+anywhere, no telemetry, tool-calling included.
+
+**It is a different kind of thing, though.** Luxand sells a *developer SDK* —
+a library you embed to get local inference. We built a *product*: the authoring
+console, the knowledge pipeline, the distribution channel and the governance
+view that sit on top of inference. Their layer is roughly the layer we get from
+llama.cpp / llama.rn.
+
+| | **Luxand LLM SDK** | **This project** |
+|---|---|---|
+| Category | Commercial SDK/library | End-to-end internal product |
+| Platforms | Android, iOS, Windows, Linux, macOS, ARM/Pi | Android + Windows server (no iOS) |
+| Backends | CPU, Metal, CUDA | CPU only |
+| Languages | C, C++, Kotlin, Swift, .NET, Python (one C ABI) | Python + TypeScript/RN |
+| Streaming chat | Yes | Yes |
+| Tool calling | Yes, OpenAI-style with typed accessors | Yes, Qwen3 `<tool_call>` convention |
+| Schema-constrained JSON | Yes, grammar-constrained | **No** |
+| Vision / multimodal | Yes | **No** |
+| Concurrent sessions | Yes, sharing one pass over the weights | One model, one session |
+| OpenAI-compatible local server | Yes, in-process | Only via `llama-server` on the host |
+| **Knowledge base / RAG** | **Not offered** | **Yes** — chunk, embed, ship, retrieve on-device |
+| **Agent authoring for non-engineers** | **Not offered** | **Yes** — the Studio |
+| **Versioned distribution to a fleet** | **Not offered** | **Yes** — bundles, portal, install/update |
+| **Governance dashboard** | **Not offered** | **Yes** — metadata-only telemetry |
+| Model guidance | Curated list, benchmarked on BFCL V4 agentic subsets | Curated list, **unbenchmarked** |
+| Licensing | Free for dev/non-commercial; $990/yr (startup) or $5,990/yr (business) per product; Enterprise custom. Device-side only — not for server deployment | Internal; no licence declared yet |
+
+### What this means for us
+
+**They are more plausibly a component than a rival.** Their SDK could replace
+our llama.rn inference layer and would hand us three things we do not have:
+**iOS**, **vision**, and **GPU/Metal backends** — for a per-product annual fee,
+with no per-user or per-token cost. Worth a build-vs-buy evaluation before we
+spend engineering time on an iOS runtime ourselves. The counter-argument is
+lock-in on the layer where open alternatives are strongest, and their licence
+explicitly excludes server-side use, which our Journey-2 web runtime is.
+
+**Where we are genuinely differentiated:** everything above the model. An SDK
+does not give a delivery manager a way to build an agent, does not compile a
+knowledge base into a portable artefact, does not version and distribute it to
+a fleet, and does not answer "who used what, and how well is it working". That
+stack is our product, and nothing on their page competes with it.
+
+**Where they expose a real gap in our work:** they publish agentic benchmark
+scores (BFCL V4 subsets, ~40,000 tasks by their own account) and pick
+recommended models per hardware class from measurement. We pick models from
+reasoning and vendor notes — see §0 Pending #8 and the BRD's R-7. Their
+methodology is a good template for the evaluation harness we are missing.
+
+**Their model table also suggests our catalog is dated.** Their
+best-score-per-gigabyte pick for mass-market phones is a ~2.7 GB 4-bit model
+scoring 67.0% agentic, where our default is Qwen3 1.7B. A catalog refresh
+against current small models is worth a spike.
+
+> Figures above are as published by Luxand (read September 2026), including
+> benchmark numbers they describe as their own internal runs on a BFCL V4
+> subset. Nothing here has been independently verified by us.
+
+### Open-source reference implementations — [shubham0204](https://github.com/shubham0204)
+
+A different category again: Apache-2.0 projects by one developer (Shubham
+Panchal, 46 repos, ~465 followers) that are the closest **technical** analogues
+to our device layer. They are not commercial products and no organisation would
+buy them instead of this platform — but they solve several of the same problems
+in the open, and three of them speak directly to items on our pending list.
+
+| Repo | Stars | What it is | Relevance to us |
+|---|---|---|---|
+| [SmolChat-Android](https://github.com/shubham0204/SmolChat-Android) | 891 | Consumer chat app for any GGUF model on Android — Kotlin + llama.cpp over JNI, on Google Play | Direct analogue of our Android runtime |
+| [OnDevice-RAG-Android](https://github.com/shubham0204/OnDevice-RAG-Android) | 198 | On-device RAG over PDF/DOCX — splitter, embeddings and vector DB all local; LLM local **or** Gemini cloud | Direct analogue of our KB/RAG path |
+| [OnDevice-Face-Recognition-Android](https://github.com/shubham0204/OnDevice-Face-Recognition-Android) | 183 | Face recognition using **ObjectBox's embedded vector database** on Android | A proven on-device vector index — our R-6 |
+| [Sentence-Embeddings-Android](https://github.com/shubham0204/Sentence-Embeddings-Android) | 72 | sentence-transformers embeddings on Android via ONNX Runtime — **supports `bge-small-en`** | An alternative to how we embed today |
+
+*(The remaining repos — CLIP, Segment-Anything, Depth-Anything, MiDaS, age/gender
+estimation — are computer vision and not relevant here.)*
+
+**SmolChat is a bring-your-own-model consumer app.** The user picks a GGUF,
+writes their own system prompt, tunes temperature/min-p, and chats; "tasks"
+save a reusable prompt. There is no organisation in the picture: no authored
+agent, no knowledge base compiled by someone else, no versioned distribution,
+no fleet governance. Its roadmap lists integrating on-device RAG and trying
+Vulkan for GPU inference — i.e. it is heading toward capabilities we already
+have, from the consumer end.
+
+Where it is ahead of us: a native Kotlin/JNI binding (thinner than our React
+Native bridge), Play Store distribution, and 891 stars' worth of hardening
+across far more device models than we have tested on.
+
+### What this group means for us
+
+**It settles a positioning question.** A polished, free, open-source on-device
+chat app already exists on the Play Store. Our Android app therefore has no
+standalone consumer value — **our value is the enterprise stack around it**:
+authoring, KB compilation, versioned distribution, governance. That is the
+story to tell, and it is the part none of these repos attempt.
+
+**Three concrete engineering leads**, all Apache-2.0 and therefore reusable
+with attribution:
+
+1. **`Sentence-Embeddings-Android` supports the exact embedding model we use
+   (`bge-small-en`), via ONNX Runtime rather than a second llama.cpp context.**
+   We currently load the embedder as its own llama.rn context and release it
+   before the chat model precisely because memory is tight. An ONNX embedder
+   could cut that peak — which is the direct cause of our Qwen3-1.7B failure
+   (§0 Pending #2). Worth a spike before we write off 1.7B on mid-range devices.
+2. **ObjectBox as an embedded vector database** is a ready answer to brute-force
+   retrieval when knowledge bases outgrow a few thousand chunks (BRD R-6).
+3. **Their Vulkan investigation** is the same GPU-offload question we parked
+   after finding llama.rn's OpenCL/Adreno auto-selection unreliable.
+
+**One design contrast worth keeping.** `OnDevice-RAG-Android` indexes documents
+*on the phone* — the user adds a PDF and the device does the chunking and
+embedding. We compile the knowledge base *on the server* and ship it inside the
+bundle. Ours suits an organisation distributing curated, consistent knowledge to
+many handsets; theirs suits personal documents. We already support the second
+pattern as a secondary path (inline KB upload, BRD FR-2.7), so the two models
+coexist rather than compete.
+
+> Stars, licences and descriptions read from GitHub in September 2026.
 
 ---
 
@@ -370,13 +499,14 @@ especially prefill. On-device budget: SLM 0.4–2.3 GB + embedder 35 MB (GGUF q8
 | `runtime/` | Journey 2 web app + phone portal + export pages + telemetry ingest |
 | `core/telemetry.py` | shared governance store (usage metadata only, no content) |
 | `android_app/AgentRuntime/` | React Native app (see `android_app/BUILD.md`) |
-| `finetune/` | QLoRA pipeline: dataset builder here, train/merge on a GPU box, GGUF export — see its README |
+| `finetune/` | requirement-driven fine-tuning: spec → synth → dataset gate → job pack → adapter gate — see [`docs/finetuning.md`](docs/finetuning.md) |
+| `core/adapters.py` | LoRA adapter registry: import, promotion gate, manifest block |
 | `models/` | GGUF files + embedder cache (served at `/models/`) |
 | `bundles/` | published agent bundles + `registry.json` |
 | `sample_docs/` | Acme demo corpus (MOMs, status, risks, ADRs, customer profile) |
 | `scripts/` | service start scripts, `seed_demo.py` |
 | `cloudflare/` | named-tunnel setup for permanent URLs, portable to any machine — see its README |
-| `docs/` | [Business Requirements Document](docs/BRD.md) — as-built capability reference for the team |
+| `docs/` | [BRD](docs/BRD.md) (as-built capability reference), [rag-gating](docs/rag-gating.md), [finetuning](docs/finetuning.md) |
 | `llama/` | llama.cpp b9957 Windows CPU binaries |
 | `tools/` | JDK 17, Android SDK, cloudflared |
 
@@ -407,8 +537,13 @@ especially prefill. On-device budget: SLM 0.4–2.3 GB + embedder 35 MB (GGUF q8
 
 ## 9. Roadmap
 
-1. **Fine-tune per scenario** (`finetune/`) — citation discipline, refusal
-   behaviour, tool-selection accuracy; QLoRA on a GPU box → GGUF → catalog.
+1. **Run the first fine-tune** — the requirement-driven pipeline is built
+   (`finetune/`, [`docs/finetuning.md`](docs/finetuning.md)): a spec states the
+   behaviour, generates its own training data over surrogate documents, and
+   gates the resulting adapter on a scorecard before it can be published. What
+   is left is the gradient step, which needs a GPU. Adapters ship as ~30 MB
+   LoRA files applied on top of the shared base model, so a tuned agent costs a
+   small download rather than another gigabyte.
 2. ~~React Native device app~~ **done** — resolve Qwen3-1.7B init on the test
    device (native-log capture armed), then GPU/NPU offload as opt-in.
 3. iOS build of the same RN app (needs a Mac or CI macOS runner).
