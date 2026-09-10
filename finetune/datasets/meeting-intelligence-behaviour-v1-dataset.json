@@ -1,0 +1,76 @@
+{
+  "spec": "C:\\slm\\finetune\\specs\\meeting-intelligence.yaml",
+  "adapter_id": "meeting-intelligence-behaviour-v1",
+  "agent": "meeting-intelligence",
+  "generation": {
+    "per_requirement": {
+      "R1-cite": {
+        "recipe": "grounded_qa",
+        "requested": 120,
+        "produced": 120,
+        "dropped_probe_collision": 0,
+        "dropped_duplicate": 0,
+        "yield": 1.0
+      },
+      "R2-refuse": {
+        "recipe": "absent_entity",
+        "requested": 70,
+        "produced": 61,
+        "dropped_probe_collision": 9,
+        "dropped_duplicate": 0,
+        "yield": 0.87
+      },
+      "R3-tools": {
+        "recipe": "tool_router",
+        "requested": 90,
+        "produced": 69,
+        "dropped_probe_collision": 0,
+        "dropped_duplicate": 21,
+        "yield": 0.77
+      },
+      "R4-brief": {
+        "recipe": null,
+        "produced": 0,
+        "reason": "already passing at baseline"
+      },
+      "R5-social": {
+        "recipe": "smalltalk",
+        "requested": 24,
+        "produced": 19,
+        "dropped_probe_collision": 5,
+        "dropped_duplicate": 0,
+        "yield": 0.79
+      }
+    },
+    "skipped": [
+      "R4-brief"
+    ],
+    "teacher": {
+      "url": null,
+      "calls": 0,
+      "failures": 0
+    },
+    "agent_source": "installed bundle"
+  },
+  "validation": {
+    "examples": 269,
+    "probe_leakage": 0,
+    "exact_duplicates": 0,
+    "per_requirement": {
+      "R1-cite": 120,
+      "R2-refuse": 61,
+      "R3-tools": 69,
+      "R5-social": 19
+    },
+    "skipped_at_baseline": [
+      "R4-brief"
+    ],
+    "refusal_share": 0.23,
+    "tokens_p50": 1219,
+    "tokens_max": 1539,
+    "real_kb_terms_checked": 76
+  },
+  "n_train": 238,
+  "n_val": 31,
+  "n_dropped_duplicates": 0
+}

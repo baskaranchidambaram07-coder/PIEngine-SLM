@@ -1,0 +1,228 @@
+# Requirement spec — Meeting Intelligence scenario fine-tune.
+#
+# Probes below are the HELD-OUT test set: synth.py refuses to emit any training
+# example whose question matches one, and evaluate.py grades only these. The
+# facts they assert come from this agent's real knowledge base (the Acme
+# programme documents); the training data does not — it is generated over
+# templated surrogates with a randomised cast, so no Acme fact reaches the
+# weights. See docs/finetuning.md D1.
+
+spec: slm-finetune-spec/1
+agent: meeting-intelligence
+base_model: qwen3-1.7b-q4_k_m
+adapter_id: meeting-intelligence-behaviour-v1
+description: >-
+  Teach the stock Qwen3-1.7B the four behaviours this scenario keeps getting
+  wrong: naming its source, refusing absent facts, routing to the right tool
+  with valid arguments, and answering short enough to read between meetings.
+
+training:
+  epochs: 3
+  lr: 2.0e-4
+  lora_r: 16
+  max_len: 2048
+
+requirements:
+  - id: R1-cite
+    kind: citation
+    statement: >-
+      Every answer that asserts a fact names the source document it came from.
+    rationale: >-
+      A delivery manager repeats these answers to a steering committee. An
+      unattributed claim from a 1.7B model is not evidence, and the prompt
+      alone does not reliably produce attribution — removing the "cite the
+      source document" line from this agent's prompt caused deterministic
+      confusion between two people named in the same chunk (README, prompt
+      tuning note).
+    target: 0.9
+    weight: 2
+    probes:
+      - ask: "When is Phase 2 go-live?"
+        expect:
+          contains_any: ["30 september"]
+          cites: true
+          grounded: true
+      - ask: "Who is the executive sponsor at Acme?"
+        expect:
+          contains_any: ["priya"]
+          cites: true
+      - ask: "How much of the Phase 2 budget is consumed?"
+        expect:
+          contains_any: ["61"]
+          cites: true
+      - ask: "What SSO approach did we agree?"
+        expect:
+          contains_any: ["oidc"]
+          cites: true
+      - ask: "Who runs the InfoSec review?"
+        expect:
+          contains_any: ["anita"]
+          cites: true
+        note: >-
+          Attribution trap: Anita performs the review, Meera owns the risk, and
+          both names sit in the same chunk.
+      - ask: "When does the master services agreement run to?"
+        expect:
+          contains_any: ["march 2027"]
+          cites: true
+    synth:
+      recipe: grounded_qa
+      n: 120
+      k: 3
+      surrogates: [project-delivery, customer]
+
+  - id: R2-refuse
+    kind: refusal
+    statement: >-
+      Declines when the retrieved context does not contain the answer, instead
+      of inferring one from passages that merely look relevant.
+    rationale: >-
+      Vector search always returns its top_k, so an absent entity that sounds
+      in-domain ("the Phase 4 budget") arrives surrounded by plausible
+      passages. Measured in docs/rag-gating.md: this is where the stock model
+      invents, and it invents confidently.
+    target: 0.9
+    weight: 2
+    probes:
+      - ask: "What is the Phase 4 budget?"
+        expect:
+          refuses: true
+      - ask: "Who is the CTO at Acme?"
+        expect:
+          refuses: true
+      - ask: "When is the Phase 3 kickoff meeting?"
+        expect:
+          refuses: true
+      - ask: "What is Acme's Singapore office address?"
+        expect:
+          refuses: true
+      - ask: "Who signed the Phase 5 contract?"
+        expect:
+          refuses: true
+      - ask: "What penalty applies if we miss the go-live date?"
+        expect:
+          refuses: true
+    synth:
+      recipe: absent_entity
+      n: 70
+      surrogates: [project-delivery, customer]
+
+  - id: R3-tools
+    kind: tool_call
+    statement: >-
+      Emits exactly one well-formed <tool_call> with the right tool name and
+      every required argument present.
+    rationale: >-
+      The runtime parses <tool_call> out of the token stream; a malformed call
+      is dropped silently, so from the user's side the assistant simply ignored
+      them. Argument omission is the common failure — create_action_item
+      arrives with an owner and no title.
+    target: 0.85
+    weight: 1.5
+    probes:
+      - ask: "Add an action item: review the DR failover test results, owner Anil, due 2026-07-15."
+        expect:
+          tool_call: create_action_item
+          tool_args_valid: true
+      - ask: "Log a task to chase the vendor on the support rota."
+        expect:
+          tool_call: create_action_item
+          tool_args_valid: true
+      - ask: "What's on my calendar today?"
+        expect:
+          tool_call: get_todays_meetings
+          tool_args_valid: true
+      - ask: "Draft a follow-up email to priya@acme.example confirming the go-live date."
+        expect:
+          tool_call: draft_email
+          tool_args_valid: true
+      - ask: "Summarise the risk register for me."
+        expect:
+          no_tool_call: true
+        note: A KB question must be answered, not routed to a tool.
+    synth:
+      recipe: tool_router
+      n: 90
+
+  - id: R4-brief
+    kind: length
+    statement: >-
+      Answers fit a phone glance — a lead line plus at most five bullets.
+    rationale: >-
+      At 8-14 tok/s a 300-word answer is half a minute of watching tokens
+      arrive. Length is a latency requirement on this hardware, not a style
+      preference.
+    target: 0.9
+    weight: 1
+    probes:
+      - ask: "Give me a two-line brief before the Acme steerco."
+        expect:
+          max_words: 90
+          max_bullets: 5
+      - ask: "What are the open risks?"
+        expect:
+          max_words: 110
+          max_bullets: 5
+      - ask: "What did we decide about the architecture?"
+        expect:
+          max_words: 90
+          cites: true
+    synth:
+      recipe: grounded_qa
+      n: 40
+      k: 3
+      surrogates: [project-delivery]
+
+  - id: R5-social
+    kind: register
+    statement: >-
+      With no retrieved context, replies naturally in one short line instead of
+      announcing that the knowledge base does not cover it.
+    rationale: >-
+      The lexical gate (core/gating.py) now correctly suppresses retrieval for
+      "hi" — which turns the agent's own "answer only from the context" rule
+      into "I don't have that in the knowledge base" as a reply to a greeting.
+      docs/rag-gating.md flags this as the required second half of that fix;
+      here it is learned rather than prompted.
+    target: 0.9
+    weight: 1
+    probes:
+      - ask: "hi"
+        expect:
+          max_words: 25
+          refuses: false
+          no_tool_call: true
+      - ask: "thanks, that's helpful"
+        expect:
+          max_words: 25
+          refuses: false
+      - ask: "good morning"
+        expect:
+          max_words: 25
+          refuses: false
+    synth:
+      recipe: smalltalk
+      n: 24
+
+# Behaviour that must NOT regress. Not trained on — this is the blast radius
+# check. A tune that wins its requirements and loses these is rejected.
+regression:
+  - ask: "ok"
+    expect:
+      max_words: 25
+      no_tool_call: true
+  - ask: "What is the weather in Chennai today?"
+    expect:
+      refuses: true
+      no_tool_call: true
+  - ask: "Who owns the data migration risk?"
+    expect:
+      cites: true
+      grounded: true
+  - ask: "What's the capital of France?"
+    expect:
+      max_words: 60
+  - ask: "List the action items from the last steerco."
+    expect:
+      grounded: true
+      max_words: 140

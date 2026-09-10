@@ -7,7 +7,7 @@ import {
   toggleNativeLog,
 } from 'llama.rn';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { EMBEDDER_FILE, MODELS_DIR, QUERY_PREFIX } from './config';
+import { ADAPTERS_DIR, EMBEDDER_FILE, MODELS_DIR, QUERY_PREFIX } from './config';
 import { log } from './logger';
 
 // Models that failed to initialize on THIS device are remembered so we never
@@ -33,6 +33,7 @@ async function markModelOk(file: string): Promise<void> {
 
 let chatCtx: LlamaContext | null = null;
 let chatModelFile: string | null = null;
+let chatAdapterKey = '';
 let embedCtx: LlamaContext | null = null;
 
 // Capture the native engine's own log lines — the only way to see llama.cpp's
@@ -60,11 +61,16 @@ async function dumpNativeTail(context: string, lines = 30) {
   await log('llm: ---- end native log ----');
 }
 
+export type LoraAdapter = { file: string; scale?: number };
+
 export async function ensureChatModel(
   modelFile: string, onStatus?: (s: string) => void,
-  expectedBytes?: number,
+  expectedBytes?: number, adapter?: LoraAdapter | null,
 ): Promise<LlamaContext> {
-  if (chatCtx && chatModelFile === modelFile) return chatCtx;
+  // The adapter is part of the context identity: same GGUF with a different
+  // adapter is different weights, so a cached context cannot be reused.
+  const adapterKey = adapter ? `${adapter.file}@${adapter.scale ?? 1}` : '';
+  if (chatCtx && chatModelFile === modelFile && chatAdapterKey === adapterKey) return chatCtx;
 
   // SAFETY GATE (first, before any native work): if this model already failed
   // to init on THIS device, never re-attempt. Repeated heavy native inits on a
@@ -126,6 +132,23 @@ export async function ensureChatModel(
   // scale to model size: large models get a memory-conservative config that
   // still serves typical agent prompts; small models get full context.
   const cfg = big ? { n_ctx: 2048, n_batch: 256 } : { n_ctx: 2048, n_batch: 512 };
+
+  // A LoRA adapter is applied at init rather than merged into the GGUF, so the
+  // base model stays shared across every agent on the device. If the adapter
+  // file is missing the agent still runs — on stock weights — because failing
+  // the chat would make a 30 MB download a hard dependency of a model that is
+  // already present and working.
+  let loraList: Array<{ path: string; scaled: number }> | undefined;
+  if (adapter) {
+    const lp = `${ADAPTERS_DIR}/${adapter.file}`;
+    if (await ReactNativeBlobUtil.fs.exists(lp)) {
+      loraList = [{ path: lp, scaled: adapter.scale ?? 1.0 }];
+      await log(`llm: applying LoRA adapter ${adapter.file} (scale ${adapter.scale ?? 1.0})`);
+    } else {
+      await log(`llm: adapter ${adapter.file} not on device — running stock weights`);
+    }
+  }
+
   await log(`llm: loading chat model ${modelFile} (n_ctx=${cfg.n_ctx}, n_batch=${cfg.n_batch}, big=${big})`);
   let lastProgress = 0;
   try {
@@ -144,6 +167,7 @@ export async function ensureChatModel(
       use_mlock: false,
       n_gpu_layers: 0,
       no_gpu_devices: true,
+      ...(loraList ? { lora_list: loraList } : {}),
     } as any, (progress: number) => {
       if (progress >= lastProgress + 25 || progress === 100) {
         lastProgress = progress;
@@ -166,6 +190,7 @@ export async function ensureChatModel(
   const info: any = chatCtx as any;
   await log(`llm: init OK · loaded in ${Date.now() - t0}ms (gpu=${info.gpu ?? '?'} ${info.reasonNoGPU ?? ''})`);
   chatModelFile = modelFile;
+  chatAdapterKey = adapterKey;
   return chatCtx;
 }
 
@@ -216,7 +241,7 @@ export async function embedText(text: string, isQuery: boolean): Promise<Float32
 }
 
 export async function releaseAll() {
-  if (chatCtx) { await chatCtx.release(); chatCtx = null; chatModelFile = null; }
+  if (chatCtx) { await chatCtx.release(); chatCtx = null; chatModelFile = null; chatAdapterKey = ''; }
   if (embedCtx) { await embedCtx.release(); embedCtx = null; }
 }
 

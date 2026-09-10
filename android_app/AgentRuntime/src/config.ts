@@ -3,6 +3,10 @@ import ReactNativeBlobUtil from 'react-native-blob-util';
 export const DOC_DIR = ReactNativeBlobUtil.fs.dirs.DocumentDir;
 export const MODELS_DIR = `${DOC_DIR}/models`;
 export const AGENTS_DIR = `${DOC_DIR}/agents`;
+// Scenario fine-tunes ship as LoRA adapters (~20-60 MB) applied on top of the
+// shared base GGUF, so a tuned agent costs a small download instead of another
+// gigabyte. Kept beside the models they modify.
+export const ADAPTERS_DIR = `${DOC_DIR}/models/adapters`;
 
 // Same embedder family as the Studio (bge-small-en-v1.5). The Studio embeds
 // passages with fastembed ONNX; llama.cpp GGUF embeddings were verified

@@ -1,5 +1,15 @@
-"""Merge a trained LoRA adapter into the base model and save full HF weights,
-ready for GGUF conversion. Run on the GPU machine after train_qlora.py.
+"""Merge a LoRA adapter into the base model and save full HF weights.
+
+ESCAPE HATCH, not the default path. The pipeline ships adapters as separate
+GGUF files applied at load time (see core/adapters.py and docs/finetuning.md
+D2): that keeps one shared base model on the device and makes a tuned agent a
+~30 MB download instead of another gigabyte. Merging is for a runtime that
+cannot apply a LoRA at all — llama.cpp and llama.rn both can.
+
+If you do merge, the result is a full model: convert and quantise it, add it to
+core/catalog.py as its own entry, and expect every device to download it.
+
+Run on the GPU machine after train_qlora.py.
 
     python merge_and_export.py --base Qwen/Qwen3-1.7B \
         --adapter out/meeting-intelligence-lora \

@@ -4,6 +4,11 @@ Every entry is a 4-bit GGUF that fits comfortably in the RAM budget of the
 target devices (iPhone 14+, Galaxy S23+, i.e. >= 6-8GB with ~2-3GB usable
 for an app). download_url lets the Studio (or the device runtime) pull the
 file on demand; license notes flag gated repos.
+
+`hf_repo` is the upstream (unquantised) Hugging Face repo the GGUF was
+built from. Fine-tuning trains against that, never against the GGUF, so a
+catalog entry without an hf_repo cannot be the base of an adapter —
+finetune/pack.py refuses the job rather than guessing the mapping.
 """
 
 MODEL_CATALOG = [
@@ -11,6 +16,7 @@ MODEL_CATALOG = [
         "id": "qwen3-1.7b-q4_k_m",
         "name": "Qwen3 1.7B (Q4_K_M)",
         "file": "Qwen3-1.7B-Q4_K_M.gguf",
+        "hf_repo": "Qwen/Qwen3-1.7B",
         "download_url": "https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf",
         "size_gb": 1.03,
         "size_bytes": 1107409472,
@@ -24,6 +30,7 @@ MODEL_CATALOG = [
         "id": "qwen3-0.6b-q4_k_m",
         "name": "Qwen3 0.6B (Q4_K_M)",
         "file": "Qwen3-0.6B-Q4_K_M.gguf",
+        "hf_repo": "Qwen/Qwen3-0.6B",
         "download_url": "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf",
         "size_gb": 0.37,
         "size_bytes": 396705472,
@@ -37,6 +44,7 @@ MODEL_CATALOG = [
         "id": "qwen3-4b-instruct-2507-q4_k_m",
         "name": "Qwen3 4B Instruct 2507 (Q4_K_M)",
         "file": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+        "hf_repo": "Qwen/Qwen3-4B-Instruct-2507",
         "download_url": "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
         "size_gb": 2.33,
         "size_bytes": 2497281120,
@@ -50,6 +58,7 @@ MODEL_CATALOG = [
         "id": "llama-3.2-3b-instruct-q4_k_m",
         "name": "Llama 3.2 3B Instruct (Q4_K_M)",
         "file": "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+        "hf_repo": "meta-llama/Llama-3.2-3B-Instruct",
         "download_url": "https://huggingface.co/unsloth/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
         "size_gb": 1.88,
         "size_bytes": 2019377600,
@@ -63,6 +72,7 @@ MODEL_CATALOG = [
         "id": "gemma-3-4b-it-q4_k_m",
         "name": "Gemma 3 4B IT (Q4_K_M)",
         "file": "gemma-3-4b-it-Q4_K_M.gguf",
+        "hf_repo": "google/gemma-3-4b-it",
         "download_url": "https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf",
         "size_gb": 2.32,
         "size_bytes": 2489894016,

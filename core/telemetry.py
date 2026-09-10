@@ -29,10 +29,12 @@ CREATE TABLE IF NOT EXISTS events (
     device_id     TEXT NOT NULL DEFAULT 'unknown',
     device_model  TEXT,                 -- e.g. 'Pixel 7' (android, optional)
     event         TEXT NOT NULL,        -- install | chat | model_load | error
-                                        -- | bundle_download | model_download | apk_download
+                                        -- | bundle_download | model_download
+                                        -- | adapter_download | apk_download
     agent_id      TEXT,
     agent_version INTEGER,
     model_id      TEXT,
+    adapter_id    TEXT,                 -- LoRA adapter applied, if any
     tokens        INTEGER,
     tok_per_sec   REAL,
     prefill_tokens INTEGER,
@@ -52,7 +54,7 @@ CREATE INDEX IF NOT EXISTS idx_events_agent ON events(agent_id);
 # Columns the caller may set directly (everything except id/ts).
 _FIELDS = (
     "source", "device_id", "device_model", "event", "agent_id", "agent_version",
-    "model_id", "tokens", "tok_per_sec", "prefill_tokens", "load_ms", "kb_hits",
+    "model_id", "adapter_id", "tokens", "tok_per_sec", "prefill_tokens", "load_ms", "kb_hits",
     "duration_ms", "bytes", "ok", "detail", "meta",
 )
 
@@ -72,8 +74,23 @@ def connect(path: str | Path = TELEMETRY_DB, ensure_schema: bool = True) -> sqli
     # EXISTS on every insert is a needless write-lock contender.
     if ensure_schema and not _SCHEMA_READY:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         _SCHEMA_READY = True
     return conn
+
+
+# Columns added after the first release. CREATE TABLE IF NOT EXISTS is a no-op
+# on an existing table, so new columns have to be added explicitly or every
+# insert fails on a database that predates them.
+_ADDED_COLUMNS = {"adapter_id": "TEXT"}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    have = {r[1] for r in conn.execute("PRAGMA table_info(events)")}
+    for col, decl in _ADDED_COLUMNS.items():
+        if col not in have:
+            conn.execute(f"ALTER TABLE events ADD COLUMN {col} {decl}")
+    conn.commit()
 
 
 def _now() -> str:
