@@ -272,7 +272,10 @@ async function downloadWithFallback(
   large: boolean, onProgress?: Progress,
 ) {
   const reasons: string[] = [];
-  for (const url of urls) {
+  // An onboarded model that was uploaded to the Studio has no CDN copy, so its
+  // download_url is empty and the portal is the only source. Without this the
+  // empty entry burns two attempts and ~3s of backoff before the real one.
+  for (const url of urls.filter(Boolean)) {
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
         if (large) await downloadLarge(url, dest, label, onProgress);

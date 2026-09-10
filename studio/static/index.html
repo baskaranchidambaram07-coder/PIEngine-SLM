@@ -138,7 +138,7 @@ const TOOL_TEMPLATES = [
     config:{method:'GET', url:'https://YOUR-DOMAIN.atlassian.net/wiki/rest/api/search?cql=text~"{query}"', headers:{Authorization:'Basic <base64 email:api_token>'}} },
 ];
 
-let state = { view:'agents', agent:null, tab:'details', catalog:[], adapters:[] };
+let state = { view:'agents', agent:null, tab:'details', catalog:[], adapters:[], onboard:null };
 
 function nav(view) {
   state.view = view; state.agent = null;
@@ -181,14 +181,24 @@ async function render() {
   }
   if (state.view === 'models') {
     const cat = await api('/api/catalog');
-    m.innerHTML = `<h1>Model Catalog</h1>
-      <div class="sub">Curated SLMs that fit handheld devices (iPhone 14+ / Galaxy S23+ class, 4-bit GGUF quantization).</div>
-      <div class="panel"><table><tr><th>Model</th><th>Size</th><th>Min device RAM</th><th>Context</th><th>License</th><th>Status</th></tr>
-      ${cat.map(c => `<tr><td><b>${esc(c.name)}</b><br><span style="color:var(--muted);font-size:11.5px">${esc(c.notes)}</span></td>
-        <td>${c.size_gb} GB</td><td>${c.min_device_ram_gb} GB</td><td>${(c.context_length/1024)}k</td>
+    m.innerHTML = `<div class="row"><div class="grow"><h1>Model Catalog</h1>
+        <div class="sub">SLMs that fit handheld devices (iPhone 14+ / Galaxy S23+ class, 4-bit GGUF quantization).</div></div>
+        <button onclick="toggleOnboard()">${state.onboard ? 'Cancel' : '+ Onboard model'}</button>
+      </div>
+      <div id="onboard-panel"></div>
+      <div class="panel"><table><tr><th>Model</th><th>Size</th><th>Min device RAM</th><th>Context</th><th>License</th><th>Status</th><th style="text-align:right">Actions</th></tr>
+      ${cat.map(c => `<tr><td><b>${esc(c.name)}</b>
+          ${c.source === 'custom' ? '<span class="chip blue">onboarded</span>' : ''}
+          <br><span style="color:var(--muted);font-size:11.5px">${esc(c.notes)}</span></td>
+        <td>${c.size_gb || '?'} GB</td><td>${c.min_device_ram_gb} GB</td><td>${(c.context_length/1024).toFixed(0)}k</td>
         <td style="font-size:12px">${esc(c.license)}</td>
-        <td>${c.downloaded ? '<span class="chip green">on server</span>' : '<span class="chip">on demand</span>'}</td></tr>`).join('')}
+        <td>${c.downloaded ? '<span class="chip green">on server</span>' : '<span class="chip">on demand</span>'}</td>
+        <td style="text-align:right;white-space:nowrap">
+          ${!c.downloaded && c.download_url ? `<button class="ghost small" onclick="cacheModel('${c.id}')">Cache here</button>` : ''}
+          ${c.source === 'custom' ? `<button class="danger-ghost small" onclick="removeModel('${c.id}')">Remove</button>` : ''}
+        </td></tr>`).join('')}
       </table></div>`;
+    if (state.onboard) renderOnboard();
   }
   if (state.view === 'governance') {
     await renderGovernance(m);
@@ -643,6 +653,186 @@ async function publishAgent() {
     state.agent = await api('/api/agents/' + state.agent.id);
     renderEditor();
   } catch (e) { toast('Publish failed: ' + e.message, true); }
+}
+
+// ------------------------------------------------------- onboarding a model
+// Two ways in: point at a GGUF on Hugging Face, or upload one. Both read the
+// model's own header for architecture and context length rather than asking
+// the user to type them.
+
+function toggleOnboard() {
+  state.onboard = state.onboard ? null : { tab: 'hf', url: '', preview: null, busy: false, repoFiles: null };
+  render();
+}
+
+function setOnboardTab(t) {
+  state.onboard.tab = t; state.onboard.preview = null; state.onboard.repoFiles = null;
+  renderOnboard();
+}
+
+function renderOnboard() {
+  const o = state.onboard, el = $('onboard-panel');
+  if (!o || !el) return;
+  const p = o.preview;
+  el.innerHTML = `<div class="panel">
+    <div class="tabs" style="margin-top:0">
+      <div class="tab ${o.tab === 'hf' ? 'active' : ''}" onclick="setOnboardTab('hf')">From Hugging Face</div>
+      <div class="tab ${o.tab === 'upload' ? 'active' : ''}" onclick="setOnboardTab('upload')">Upload a GGUF</div>
+    </div>
+    ${o.tab === 'hf' ? `
+      <label>Hugging Face URL — a .gguf file, or a repo to list its files</label>
+      <div class="row">
+        <input id="ob-url" class="grow" placeholder="https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf"
+               value="${esc(o.url)}" onkeydown="if(event.key==='Enter')onboardInspect()">
+        <button onclick="onboardInspect()" ${o.busy ? 'disabled' : ''}>${o.busy ? 'Reading…' : 'Inspect'}</button>
+      </div>
+      <div style="color:var(--muted);font-size:12px;margin-top:8px">
+        Only the model's header is read (a few hundred KB) — the weights are not downloaded unless you ask.
+      </div>
+      ${o.repoFiles ? `<div class="result"><b>${o.repoFiles.length} GGUF files in this repo</b> — pick one:
+        ${o.repoFiles.slice(0, 40).map(f => `<div class="model-opt" onclick="pickRepoFile('${esc(f.url)}')">
+          <div class="name">${esc(f.name)}</div></div>`).join('')}</div>` : ''}
+      ${p ? `<div class="result">
+        <div class="grid2">
+          <div><label>Model id</label><input id="ob-id" value="${esc(p.id)}"></div>
+          <div><label>Display name</label><input id="ob-name" value="${esc(p.name)}"></div>
+          <div><label>Context length (from the GGUF)</label><input id="ob-ctx" type="number" value="${p.context_length}"></div>
+          <div><label>Min device RAM (GB, estimated)</label><input id="ob-ram" type="number" value="${p.min_device_ram_gb}"></div>
+          <div><label>License</label><input id="ob-lic" value="${esc(p.license)}"></div>
+          <div><label>Upstream repo for fine-tuning (optional)</label><input id="ob-repo" value="${esc(p.hf_repo)}" placeholder="Qwen/Qwen3-0.6B"></div>
+        </div>
+        <div style="margin-top:10px;color:var(--muted);font-size:12px">
+          <code>${esc(p.file)}</code> · ${p.size_gb} GB · ${esc(p.family)} architecture
+          ${p.hf_repo ? '' : ' · no upstream repo set, so this model cannot be the base of a fine-tune'}
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button class="green" onclick="onboardAdd(false)" ${o.busy ? 'disabled' : ''}>Add to catalog</button>
+          <button class="ghost" onclick="onboardAdd(true)" ${o.busy ? 'disabled' : ''}>Add and cache on server</button>
+        </div>
+      </div>` : ''}
+    ` : `
+      <label>Choose a .gguf file from this machine</label>
+      <input type="file" id="ob-file" accept=".gguf" onchange="onboardUpload(this)">
+      <div style="color:var(--muted);font-size:12px;margin-top:8px">
+        Streamed straight to the model store. Devices fetch an uploaded model from this portal —
+        there is no public CDN copy of it.
+      </div>
+      <div id="ob-progress" style="margin-top:10px"></div>
+    `}
+  </div>`;
+}
+
+function pickRepoFile(url) {
+  state.onboard.url = url;
+  state.onboard.repoFiles = null;
+  onboardInspect();
+}
+
+async function onboardInspect() {
+  const o = state.onboard;
+  const raw = ($('ob-url')?.value || o.url || '').trim();
+  if (!raw) return toast('Paste a Hugging Face URL first', true);
+  o.url = raw; o.busy = true; o.preview = null; o.repoFiles = null; renderOnboard();
+  try {
+    if (!raw.toLowerCase().includes('.gguf')) {
+      const d = await api('/api/catalog/hf-files?repo=' + encodeURIComponent(raw));
+      if (!d.files.length) throw new Error('no .gguf files in that repo');
+      o.repoFiles = d.files.map(f => ({ name: f, url: d.urls[f] }));
+      toast(`${d.files.length} GGUF files found`);
+    } else {
+      const d = await api('/api/catalog/inspect', { method: 'POST', json: { url: raw } });
+      o.preview = d.entry;
+      if (d.already_in_catalog) toast('A model with this id is already in the catalog', true);
+    }
+  } catch (e) { toast('Inspect failed: ' + e.message, true); }
+  o.busy = false; renderOnboard();
+}
+
+async function onboardAdd(downloadNow) {
+  const o = state.onboard;
+  o.busy = true; renderOnboard();
+  try {
+    const res = await api('/api/catalog/custom', { method: 'POST', json: {
+      url: o.url,
+      id: $('ob-id').value.trim(),
+      name: $('ob-name').value.trim(),
+      context_length: Number($('ob-ctx').value) || 0,
+      min_device_ram_gb: Number($('ob-ram').value) || 0,
+      license: $('ob-lic').value.trim(),
+      hf_repo: $('ob-repo').value.trim(),
+      download_now: !!downloadNow,
+    }});
+    toast(`Onboarded ${res.entry.name}${downloadNow ? ' — downloading to server' : ''}`);
+    state.onboard = null;
+    render();
+    if (downloadNow) pollModelDownloads();
+  } catch (e) { toast('Onboard failed: ' + e.message, true); o.busy = false; renderOnboard(); }
+}
+
+function onboardUpload(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const bar = $('ob-progress');
+  const fd = new FormData();
+  fd.append('file', file);
+  // XHR rather than fetch: these files are gigabytes and fetch reports no
+  // upload progress, which would leave the page looking frozen.
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/catalog/upload');
+  xhr.upload.onprogress = (e) => {
+    if (!e.lengthComputable) return;
+    const pct = Math.round(e.loaded / e.total * 100);
+    bar.innerHTML = `<div class="spinner"></div> Uploading ${esc(file.name)} — ${pct}%
+      (${(e.loaded / 1e9).toFixed(2)} / ${(e.total / 1e9).toFixed(2)} GB)`;
+  };
+  xhr.onload = () => {
+    if (xhr.status === 200) {
+      const res = JSON.parse(xhr.responseText);
+      toast(`Onboarded ${res.entry.name} from upload`);
+      state.onboard = null; render();
+    } else {
+      let d; try { d = JSON.parse(xhr.responseText).detail; } catch { d = xhr.statusText; }
+      bar.innerHTML = '';
+      toast('Upload failed: ' + d, true);
+    }
+  };
+  xhr.onerror = () => { bar.innerHTML = ''; toast('Upload failed — connection lost', true); };
+  xhr.send(fd);
+}
+
+async function cacheModel(id) {
+  try {
+    const r = await api(`/api/catalog/${id}/download`, { method: 'POST' });
+    toast(r.state === 'downloading' ? 'Downloading to server…' : 'Already on the server');
+    if (r.state === 'downloading') pollModelDownloads();
+  } catch (e) { toast('Download failed: ' + e.message, true); }
+}
+
+let modelPollTimer;
+async function pollModelDownloads() {
+  clearTimeout(modelPollTimer);
+  const d = await api('/api/catalog/downloads').catch(() => ({}));
+  for (const [f, p] of Object.entries(d)) {
+    if (p.error) toast(`${f}: ${p.error}`, true);
+  }
+  const active = Object.entries(d).filter(([, p]) => !p.error && (!p.total || p.done < p.total));
+  if (active.length) {
+    const [f, p] = active[0];
+    const pct = p.total ? Math.round(p.done / p.total * 100) : 0;
+    toast(`Downloading ${f} — ${pct}%`);
+    modelPollTimer = setTimeout(pollModelDownloads, 2000);
+  } else if (state.view === 'models') {
+    render();
+  }
+}
+
+async function removeModel(id) {
+  if (!confirm(`Remove "${id}" from the catalog and delete its GGUF from this server?\n\nThis cannot be undone.`)) return;
+  try {
+    const r = await api(`/api/catalog/custom/${id}?delete_file=true`, { method: 'DELETE' });
+    toast(`Removed ${id}${r.file_deleted ? ' and its GGUF' : ''}`);
+    render();
+  } catch (e) { toast('Remove failed: ' + e.message, true); }
 }
 
 render();

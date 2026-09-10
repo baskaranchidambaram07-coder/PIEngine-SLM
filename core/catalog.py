@@ -11,6 +11,13 @@ catalog entry without an hf_repo cannot be the base of an adapter —
 finetune/pack.py refuses the job rather than guessing the mapping.
 """
 
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from .paths import MODELS_DIR
+
 MODEL_CATALOG = [
     {
         "id": "qwen3-1.7b-q4_k_m",
@@ -85,8 +92,69 @@ MODEL_CATALOG = [
 ]
 
 
+# ------------------------------------------------------------ onboarded models
+# The curated list above ships in code. Models a user onboards at runtime — from
+# a Hugging Face URL or an upload — cannot, so they live in a JSON side-car
+# beside the GGUF files they describe. Keeping them in MODELS_DIR means the
+# catalog travels with the model store and stays out of git.
+
+CUSTOM_FIELDS = ("id", "name", "file", "hf_repo", "download_url", "size_gb",
+                 "size_bytes", "min_device_ram_gb", "context_length", "license",
+                 "notes", "family")
+
+
+def custom_path() -> Path:
+    return MODELS_DIR / "custom_catalog.json"
+
+
+def load_custom() -> list[dict]:
+    p = custom_path()
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, OSError):
+        # A corrupt side-car must not take the whole catalog down; the curated
+        # models still work and the file can be repaired.
+        return []
+
+
+def save_custom(entries: list[dict]) -> None:
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    custom_path().write_text(json.dumps(entries, indent=2), encoding="utf-8")
+
+
+def all_models() -> list[dict]:
+    """Curated models first, then onboarded ones, each tagged with its source."""
+    out = [{**m, "source": "builtin"} for m in MODEL_CATALOG]
+    known = {m["id"] for m in out}
+    for m in load_custom():
+        if m.get("id") not in known:
+            out.append({**m, "source": "custom"})
+    return out
+
+
+def add_custom(entry: dict) -> dict:
+    if any(m["id"] == entry["id"] for m in MODEL_CATALOG):
+        raise ValueError(f"'{entry['id']}' is a built-in model id")
+    entries = [m for m in load_custom() if m.get("id") != entry["id"]]
+    entries.append(entry)
+    save_custom(entries)
+    return entry
+
+
+def remove_custom(model_id: str) -> bool:
+    entries = load_custom()
+    kept = [m for m in entries if m.get("id") != model_id]
+    if len(kept) == len(entries):
+        return False
+    save_custom(kept)
+    return True
+
+
 def get_model(model_id: str) -> dict | None:
-    for m in MODEL_CATALOG:
+    for m in all_models():
         if m["id"] == model_id:
             return m
     return None

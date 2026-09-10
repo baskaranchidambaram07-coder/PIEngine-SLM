@@ -25,8 +25,11 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from core import adapters, chunking, embeddings, kbstore, telemetry, versions
-from core.catalog import MODEL_CATALOG, get_model
+import requests
+
+from core import adapters, chunking, embeddings, ggufmeta, kbstore, telemetry, versions
+from core import catalog as catalog_mod
+from core.catalog import get_model
 from core.paths import BUNDLES_DIR, MODELS_DIR, ROOT
 
 APP_DIR = Path(__file__).resolve().parent
@@ -120,11 +123,275 @@ class SearchIn(BaseModel):
 @app.get("/api/catalog")
 def catalog():
     out = []
-    for m in MODEL_CATALOG:
+    for m in catalog_mod.all_models():
         entry = dict(m)
         entry["downloaded"] = (MODELS_DIR / m["file"]).exists()
         out.append(entry)
     return out
+
+
+# --------------------------------------------------- onboarding a new model
+# Models can be brought in two ways: by pointing at a GGUF on Hugging Face, or
+# by uploading one. Both derive their metadata from the GGUF header rather than
+# asking the user to type it — a wrong context_length reaches the device
+# manifest and llama-server then truncates or over-allocates against it.
+
+HF_HOSTS = {"huggingface.co", "hf.co"}
+_MODEL_DOWNLOADS: dict[str, dict] = {}   # file -> {total, done, error}
+
+
+def _require_hf_url(url: str) -> str:
+    """Only Hugging Face, only https, only .gguf.
+
+    This endpoint makes the server fetch a user-supplied URL, so an open
+    allowlist would turn the Studio into an SSRF proxy onto whatever the box
+    can reach.
+    """
+    from urllib.parse import urlparse
+
+    u = urlparse(url.strip())
+    if u.scheme != "https":
+        raise HTTPException(400, "URL must be https")
+    if u.hostname not in HF_HOSTS:
+        raise HTTPException(400, f"only Hugging Face URLs are accepted (got '{u.hostname}')")
+    if not u.path.lower().endswith(".gguf"):
+        raise HTTPException(400, "URL must point directly at a .gguf file")
+    # a blob link is the human page for the same object
+    return url.strip().replace("/blob/", "/resolve/")
+
+
+def safe_gguf_name(name: str) -> str:
+    """Filename only, no traversal, must be a .gguf."""
+    base = Path(str(name)).name.strip()
+    if not base.lower().endswith(".gguf"):
+        raise HTTPException(400, "file must be a .gguf")
+    if not _re.fullmatch(r"[A-Za-z0-9._+-]+", base):
+        raise HTTPException(400, f"unsafe filename '{base}'")
+    return base
+
+
+def _derive_entry(file_name: str, meta: dict, size_bytes: int,
+                  download_url: str) -> dict:
+    size_gb = round(size_bytes / 1e9, 2) if size_bytes else 0.0
+    stem = file_name[:-5] if file_name.lower().endswith(".gguf") else file_name
+    quant = meta.get("quantization")
+    pretty = meta.get("name") or stem
+    return {
+        "id": slugify(stem),
+        "name": f"{pretty} ({quant})" if quant and quant not in pretty else pretty,
+        "file": file_name,
+        # The upstream *unquantised* repo cannot be inferred from a GGUF URL,
+        # and finetune/pack.py refuses to guess it, so leave it for the user.
+        "hf_repo": "",
+        "download_url": download_url,
+        "size_gb": size_gb,
+        "size_bytes": size_bytes,
+        # weights + KV cache + compute buffer runs to roughly twice the file.
+        "min_device_ram_gb": max(3, int(round(size_gb * 2 + 1))),
+        "context_length": meta.get("context_length") or 4096,
+        "license": "check the source repo",
+        "notes": (f"Onboarded model. {meta.get('architecture') or 'unknown'} architecture"
+                  + (f", {meta['size_label']} parameters" if meta.get("size_label") else "")
+                  + (f", {quant} quantisation" if quant else "") + "."),
+        "family": meta.get("architecture") or "unknown",
+    }
+
+
+class InspectIn(BaseModel):
+    url: str
+
+
+@app.post("/api/catalog/inspect")
+def inspect_model(body: InspectIn):
+    """Preview what onboarding this URL would add — nothing is saved."""
+    url = _require_hf_url(body.url)
+    file_name = safe_gguf_name(url.split("?")[0].rsplit("/", 1)[-1])
+    try:
+        meta = ggufmeta.from_url(url)
+    except ggufmeta.GGUFError as exc:
+        raise HTTPException(400, f"not a readable GGUF: {exc}")
+    except requests.RequestException as exc:
+        raise HTTPException(502, f"could not read the model header: {str(exc)[:200]}")
+
+    size_bytes = 0
+    try:
+        head = requests.head(url, allow_redirects=True, timeout=30)
+        size_bytes = int(head.headers.get("content-length") or 0)
+    except (requests.RequestException, ValueError):
+        pass
+
+    entry = _derive_entry(file_name, meta, size_bytes, url)
+    return {"entry": entry, "gguf": meta,
+            "already_in_catalog": catalog_mod.get_model(entry["id"]) is not None,
+            "already_downloaded": (MODELS_DIR / file_name).exists()}
+
+
+@app.get("/api/catalog/hf-files")
+def hf_files(repo: str):
+    """List the GGUFs in a Hugging Face repo, so a repo URL is enough."""
+    repo = repo.strip().rstrip("/")
+    for host in HF_HOSTS:
+        repo = repo.replace(f"https://{host}/", "")
+    repo = _re.sub(r"^(models/)", "", repo).split("/tree/")[0]
+    if not _re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
+        raise HTTPException(400, f"'{repo}' is not a Hugging Face <owner>/<repo>")
+    try:
+        r = requests.get(f"https://huggingface.co/api/models/{repo}", timeout=30)
+        if r.status_code == 404:
+            raise HTTPException(404, f"repo '{repo}' not found (or gated)")
+        r.raise_for_status()
+        data = r.json()
+    except requests.RequestException as exc:
+        raise HTTPException(502, f"Hugging Face unreachable: {str(exc)[:200]}")
+    files = [s["rfilename"] for s in data.get("siblings", [])
+             if s.get("rfilename", "").lower().endswith(".gguf")]
+    return {"repo": repo, "gated": bool(data.get("gated")),
+            "files": sorted(files),
+            "urls": {f: f"https://huggingface.co/{repo}/resolve/main/{f}" for f in files}}
+
+
+class OnboardIn(BaseModel):
+    url: str
+    id: str = ""
+    name: str = ""
+    context_length: int = 0
+    min_device_ram_gb: int = 0
+    license: str = ""
+    notes: str = ""
+    hf_repo: str = ""
+    download_now: bool = False
+
+
+@app.post("/api/catalog/custom")
+def onboard_from_url(body: OnboardIn):
+    """Add a Hugging Face GGUF to the catalog, optionally caching it here."""
+    preview = inspect_model(InspectIn(url=body.url))
+    entry = preview["entry"]
+    for field in ("id", "name", "license", "notes", "hf_repo"):
+        if getattr(body, field):
+            entry[field] = getattr(body, field)
+    if body.context_length:
+        entry["context_length"] = body.context_length
+    if body.min_device_ram_gb:
+        entry["min_device_ram_gb"] = body.min_device_ram_gb
+    entry["id"] = slugify(entry["id"])
+
+    if catalog_mod.get_model(entry["id"]):
+        raise HTTPException(409, f"model id '{entry['id']}' already exists")
+    try:
+        catalog_mod.add_custom(entry)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+
+    if body.download_now and not (MODELS_DIR / entry["file"]).exists():
+        _start_model_download(entry)
+    return {"ok": True, "entry": entry,
+            "downloading": bool(body.download_now),
+            "gguf": preview["gguf"]}
+
+
+@app.post("/api/catalog/upload")
+async def onboard_upload(file: UploadFile = File(...)):
+    """Onboard a GGUF uploaded from the browser.
+
+    Streamed to disk in chunks — these files are gigabytes and must never be
+    held in memory. Written to a .part first so a failed upload cannot leave a
+    truncated GGUF that looks installable.
+    """
+    name = safe_gguf_name(file.filename or "")
+    dest = MODELS_DIR / name
+    if dest.exists():
+        raise HTTPException(409, f"'{name}' is already on the server")
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = MODELS_DIR / (name + ".part")
+    size = 0
+    try:
+        with open(tmp, "wb") as fh:
+            while chunk := await file.read(4 << 20):
+                fh.write(chunk)
+                size += len(chunk)
+        try:
+            meta = ggufmeta.from_file(tmp)
+        except ggufmeta.GGUFError as exc:
+            raise HTTPException(400, f"not a valid GGUF: {exc}")
+        tmp.rename(dest)
+    except HTTPException:
+        tmp.unlink(missing_ok=True)
+        raise
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(500, f"could not store the upload: {str(exc)[:200]}")
+
+    # No CDN for an uploaded file: devices fetch it from the portal, which
+    # already serves /models/<file> and is the fallback source in the app.
+    entry = _derive_entry(name, meta, size, "")
+    if catalog_mod.get_model(entry["id"]):
+        entry["id"] = f"{entry['id']}-{int(datetime.now(timezone.utc).timestamp())}"
+    entry["notes"] = entry["notes"].replace("Onboarded model.", "Uploaded model.")
+    catalog_mod.add_custom(entry)
+    return {"ok": True, "entry": entry, "gguf": meta, "bytes": size}
+
+
+@app.delete("/api/catalog/custom/{model_id}")
+def remove_onboarded(model_id: str, delete_file: bool = False):
+    entry = catalog_mod.get_model(model_id)
+    if not entry or entry.get("source") == "builtin":
+        raise HTTPException(404, f"'{model_id}' is not an onboarded model")
+    conn = db()
+    users = [aid for (aid, cfg) in conn.execute("SELECT id, config FROM agents")
+             if json.loads(cfg).get("model_id") == model_id]
+    if users:
+        raise HTTPException(409, f"still used by: {', '.join(users)}")
+    catalog_mod.remove_custom(model_id)
+    removed = False
+    if delete_file:
+        path = MODELS_DIR / entry["file"]
+        removed = path.exists()
+        path.unlink(missing_ok=True)
+    return {"ok": True, "id": model_id, "file_deleted": removed}
+
+
+def _start_model_download(entry: dict) -> None:
+    import threading
+
+    f = entry["file"]
+    prog = _MODEL_DOWNLOADS.setdefault(f, {"total": 0, "done": 0, "error": None})
+    prog.update({"done": 0, "error": None})
+
+    def run():
+        try:
+            with requests.get(entry["download_url"], stream=True, timeout=60) as r:
+                r.raise_for_status()
+                prog["total"] = int(r.headers.get("content-length") or 0)
+                tmp = MODELS_DIR / (f + ".part")
+                with open(tmp, "wb") as fh:
+                    for chunk in r.iter_content(chunk_size=1 << 20):
+                        fh.write(chunk)
+                        prog["done"] += len(chunk)
+                tmp.rename(MODELS_DIR / f)
+        except Exception as exc:  # noqa: BLE001 — surface any failure to the UI
+            prog["error"] = str(exc)[:300]
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+@app.post("/api/catalog/{model_id}/download")
+def cache_model_here(model_id: str):
+    """Pull a catalog model onto this server so devices can use the portal."""
+    entry = catalog_mod.get_model(model_id)
+    if not entry:
+        raise HTTPException(404, f"unknown model '{model_id}'")
+    if (MODELS_DIR / entry["file"]).exists():
+        return {"ok": True, "state": "already downloaded"}
+    if not entry.get("download_url"):
+        raise HTTPException(400, "this model has no source URL (it was uploaded)")
+    _start_model_download(entry)
+    return {"ok": True, "state": "downloading"}
+
+
+@app.get("/api/catalog/downloads")
+def model_download_progress():
+    return _MODEL_DOWNLOADS
 
 
 # ---------------------------------------------------------------- agents
