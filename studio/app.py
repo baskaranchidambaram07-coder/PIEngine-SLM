@@ -27,7 +27,8 @@ from pydantic import BaseModel
 
 import requests
 
-from core import adapters, chunking, embeddings, ggufmeta, kbstore, telemetry, versions
+from core import (adapters, chunking, downloads, embeddings, ggufmeta, kbstore,
+                  telemetry, versions)
 from core import catalog as catalog_mod
 from core.catalog import get_model
 from core.paths import BUNDLES_DIR, MODELS_DIR, ROOT
@@ -359,11 +360,11 @@ def _start_model_download(entry: dict) -> None:
     prog.update({"done": 0, "error": None})
 
     def run():
+        tmp = MODELS_DIR / (f + ".part")
         try:
             with requests.get(entry["download_url"], stream=True, timeout=60) as r:
                 r.raise_for_status()
                 prog["total"] = int(r.headers.get("content-length") or 0)
-                tmp = MODELS_DIR / (f + ".part")
                 with open(tmp, "wb") as fh:
                     for chunk in r.iter_content(chunk_size=1 << 20):
                         fh.write(chunk)
@@ -371,6 +372,7 @@ def _start_model_download(entry: dict) -> None:
                 tmp.rename(MODELS_DIR / f)
         except Exception as exc:  # noqa: BLE001 — surface any failure to the UI
             prog["error"] = str(exc)[:300]
+            prog["reclaimed_bytes"] = downloads.discard_partial(tmp)
 
     threading.Thread(target=run, daemon=True).start()
 

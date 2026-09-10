@@ -21,7 +21,8 @@ from fastapi.responses import (FileResponse, HTMLResponse, PlainTextResponse,
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from core import adapters, embeddings, gating, kbstore, telemetry, versions
+from core import (adapters, downloads, embeddings, gating, kbstore, telemetry,
+                  versions)
 from core.paths import BUNDLES_DIR, MODELS_DIR, ROOT
 
 from . import export, llm, tools
@@ -135,11 +136,11 @@ def api_store():
 def _download_model(model: dict) -> None:
     f = model["file"]
     prog = _model_downloads.setdefault(f, {"total": 0, "done": 0, "error": None})
+    tmp = MODELS_DIR / (f + ".part")
     try:
         with requests.get(model["download_url"], stream=True, timeout=60) as r:
             r.raise_for_status()
             prog["total"] = int(r.headers.get("content-length", 0))
-            tmp = MODELS_DIR / (f + ".part")
             with open(tmp, "wb") as fh:
                 for chunk in r.iter_content(chunk_size=1 << 20):
                     fh.write(chunk)
@@ -147,19 +148,20 @@ def _download_model(model: dict) -> None:
             tmp.rename(MODELS_DIR / f)
     except Exception as exc:  # noqa: BLE001 — surface any failure to the UI
         prog["error"] = str(exc)[:300]
+        prog["reclaimed_bytes"] = downloads.discard_partial(tmp)
 
 
 def _download_adapter(adapter: dict) -> None:
     """Adapters come from the portal, not Hugging Face — they are ours."""
     f = adapter["file"]
     prog = _model_downloads.setdefault(f, {"total": 0, "done": 0, "error": None})
+    tmp = adapters.ADAPTERS_DIR / (f + ".part")
     try:
         adapters.ADAPTERS_DIR.mkdir(parents=True, exist_ok=True)
         url = adapter.get("download_url") or f"{STUDIO_URL}/adapters/{f}"
         with requests.get(url, stream=True, timeout=60) as r:
             r.raise_for_status()
             prog["total"] = int(r.headers.get("content-length", 0))
-            tmp = adapters.ADAPTERS_DIR / (f + ".part")
             with open(tmp, "wb") as fh:
                 for chunk in r.iter_content(chunk_size=1 << 20):
                     fh.write(chunk)
@@ -167,6 +169,7 @@ def _download_adapter(adapter: dict) -> None:
             tmp.rename(adapters.ADAPTERS_DIR / f)
     except Exception as exc:  # noqa: BLE001 — surface any failure to the UI
         prog["error"] = str(exc)[:300]
+        prog["reclaimed_bytes"] = downloads.discard_partial(tmp)
 
 
 class InstallIn(BaseModel):
