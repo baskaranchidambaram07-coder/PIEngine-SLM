@@ -23,40 +23,58 @@ LLM_URL = f"http://127.0.0.1:{LLM_PORT}"
 
 _proc: subprocess.Popen | None = None
 _loaded_model: str | None = None
+_loaded_lora: str | None = None
 
 
 def status() -> dict:
     running = _proc is not None and _proc.poll() is None
-    return {"running": running, "model": _loaded_model if running else None}
+    return {"running": running, "model": _loaded_model if running else None,
+            "adapter": _loaded_lora if running else None}
 
 
-def ensure_model(model_file: str, context: int = 4096) -> None:
-    """Start (or restart) llama-server with the requested GGUF."""
-    global _proc, _loaded_model
+def ensure_model(model_file: str, context: int = 4096, lora: Path | str | None = None) -> None:
+    """Start (or restart) llama-server with the requested GGUF and adapter.
+
+    A scenario fine-tune ships as a LoRA adapter rather than a merged model
+    (core/adapters.py explains why), so the base GGUF stays shared across every
+    agent on the device and only the ~20-60 MB adapter changes. Switching
+    adapters restarts the server exactly like switching models does.
+    """
+    global _proc, _loaded_model, _loaded_lora
     model_path = MODELS_DIR / model_file
     if not model_path.exists():
         raise FileNotFoundError(f"model file not on device: {model_file}")
 
-    if _proc is not None and _proc.poll() is None and _loaded_model == model_file:
+    lora_path = Path(lora) if lora else None
+    if lora_path and not lora_path.exists():
+        raise FileNotFoundError(f"adapter file not on device: {lora_path.name}")
+    lora_key = str(lora_path) if lora_path else None
+
+    if (_proc is not None and _proc.poll() is None
+            and _loaded_model == model_file and _loaded_lora == lora_key):
         return
 
     stop()
     threads = max(1, (os.cpu_count() or 4))
+    cmd = [
+        str(LLAMA_DIR / "llama-server.exe"),
+        "-m", str(model_path),
+        "--port", str(LLM_PORT),
+        "-c", str(context),
+        "-t", str(threads),
+        "--jinja",
+        "--no-webui",
+    ]
+    if lora_path:
+        cmd += ["--lora", str(lora_path)]
     _proc = subprocess.Popen(
-        [
-            str(LLAMA_DIR / "llama-server.exe"),
-            "-m", str(model_path),
-            "--port", str(LLM_PORT),
-            "-c", str(context),
-            "-t", str(threads),
-            "--jinja",
-            "--no-webui",
-        ],
+        cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         creationflags=subprocess.CREATE_NO_WINDOW,
     )
     _loaded_model = model_file
+    _loaded_lora = lora_key
 
     deadline = time.time() + 120
     while time.time() < deadline:
@@ -72,7 +90,7 @@ def ensure_model(model_file: str, context: int = 4096) -> None:
 
 
 def stop() -> None:
-    global _proc, _loaded_model
+    global _proc, _loaded_model, _loaded_lora
     if _proc is not None and _proc.poll() is None:
         _proc.terminate()
         try:
@@ -81,6 +99,7 @@ def stop() -> None:
             _proc.kill()
     _proc = None
     _loaded_model = None
+    _loaded_lora = None
 
 
 atexit.register(stop)
@@ -101,6 +120,12 @@ def stream_chat(messages: list[dict], generation: dict) -> Iterator[dict]:
         "max_tokens": generation.get("max_tokens", 768),
         "timings_per_token": True,  # ensures a timings object arrives on the final chunk
     }
+    # min_p truncates the tail relative to the top token's probability, which
+    # suppresses the low-confidence tokens fabricated detail is made of. Only
+    # send it when an agent asks for it — llama.cpp defaults to 0.05, so passing
+    # 0.0 unconditionally would silently DISABLE min-p sampling for every agent.
+    if generation.get("min_p") is not None:
+        payload["min_p"] = float(generation["min_p"])
     resp = requests.post(f"{LLM_URL}/v1/chat/completions", json=payload, stream=True, timeout=600)
     resp.raise_for_status()
     resp.encoding = "utf-8"  # SSE has no charset header; default latin-1 mangles UTF-8
