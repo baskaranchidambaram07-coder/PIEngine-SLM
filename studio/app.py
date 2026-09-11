@@ -206,18 +206,28 @@ def _derive_entry(file_name: str, meta: dict, size_bytes: int,
     }
 
 
-def short_note(meta: dict) -> str:
-    """A few words at most: architecture, scale, quantisation.
+MAX_NOTE_CHARS = 20
 
-    The table already shows size, RAM and context, so the note only has to
-    carry what those columns do not. Prose here just wraps the row.
+
+def short_note(meta: dict) -> str:
+    """Architecture, scale and quantisation in under MAX_NOTE_CHARS.
+
+    The table already shows size, RAM and context, so the note only carries
+    what those columns do not. The cap is enforced rather than assumed: most
+    models fit ("qwen3 1.7B Q4_K_M" is 17), but a longer architecture and
+    parameter count would not ("deepseek2 236B Q4_K_M" is 21). When it does not
+    fit, the architecture is dropped first — the model's own name above the
+    note already shows it, whereas scale and quantisation appear nowhere else.
     """
-    bits = [meta.get("architecture") or "gguf"]
-    if meta.get("size_label"):
-        bits.append(str(meta["size_label"]))
-    if meta.get("quantization"):
-        bits.append(str(meta["quantization"]))
-    return " ".join(bits[:3])
+    arch = (meta.get("architecture") or "gguf").strip()
+    size = str(meta.get("size_label") or "").strip()
+    quant = str(meta.get("quantization") or "").strip()
+
+    for parts in ([arch, size, quant], [size, quant], [arch, quant], [quant], [arch]):
+        note = " ".join(p for p in parts if p)
+        if note and len(note) <= MAX_NOTE_CHARS:
+            return note
+    return (quant or arch)[:MAX_NOTE_CHARS]
 
 
 class InspectIn(BaseModel):
