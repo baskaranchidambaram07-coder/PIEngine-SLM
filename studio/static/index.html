@@ -215,13 +215,7 @@ async function render() {
               onclick="deleteModelFile('${c.id}')">Delete file</button>` : ''}
           <button class="danger-ghost small" onclick="removeFromCatalog('${c.id}')">Remove</button>
         </td></tr>`).join('')}
-      </table>
-      <div style="color:var(--muted);font-size:12px;margin-top:12px">
-        <b>Delete file</b> frees disk but keeps the model listed — it reverts to "on demand".
-        <b>Remove</b> takes it out of the catalogue: an onboarded model is deleted outright, while a
-        curated one is hidden (it lives in code), so anything already built on it keeps working.
-      </div>
-      </div>
+      </table></div>
       ${hidden.length ? `<div class="panel"><h3>Hidden from the catalogue (${hidden.length})</h3>
         <table><tr><th>Model</th><th>Size</th><th>Still used by</th><th style="text-align:right"></th></tr>
         ${hidden.map(h => `<tr>

@@ -201,11 +201,23 @@ def _derive_entry(file_name: str, meta: dict, size_bytes: int,
         "min_device_ram_gb": max(3, int(round(size_gb * 2 + 1))),
         "context_length": meta.get("context_length") or 4096,
         "license": "check the source repo",
-        "notes": (f"Onboarded model. {meta.get('architecture') or 'unknown'} architecture"
-                  + (f", {meta['size_label']} parameters" if meta.get("size_label") else "")
-                  + (f", {quant} quantisation" if quant else "") + "."),
+        "notes": short_note(meta),
         "family": meta.get("architecture") or "unknown",
     }
+
+
+def short_note(meta: dict) -> str:
+    """A few words at most: architecture, scale, quantisation.
+
+    The table already shows size, RAM and context, so the note only has to
+    carry what those columns do not. Prose here just wraps the row.
+    """
+    bits = [meta.get("architecture") or "gguf"]
+    if meta.get("size_label"):
+        bits.append(str(meta["size_label"]))
+    if meta.get("quantization"):
+        bits.append(str(meta["quantization"]))
+    return " ".join(bits[:3])
 
 
 class InspectIn(BaseModel):
@@ -338,7 +350,6 @@ async def onboard_upload(file: UploadFile = File(...)):
     entry = _derive_entry(name, meta, size, "")
     if catalog_mod.get_model(entry["id"]):
         entry["id"] = f"{entry['id']}-{int(datetime.now(timezone.utc).timestamp())}"
-    entry["notes"] = entry["notes"].replace("Onboarded model.", "Uploaded model.")
     catalog_mod.add_custom(entry)
     return {"ok": True, "entry": entry, "gguf": meta, "bytes": size}
 
