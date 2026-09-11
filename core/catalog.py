@@ -125,14 +125,63 @@ def save_custom(entries: list[dict]) -> None:
     custom_path().write_text(json.dumps(entries, indent=2), encoding="utf-8")
 
 
-def all_models() -> list[dict]:
-    """Curated models first, then onboarded ones, each tagged with its source."""
-    out = [{**m, "source": "builtin"} for m in MODEL_CATALOG]
+# ------------------------------------------------------------- hidden models
+# A curated entry cannot be deleted — it lives in code — but a deployment may
+# not want it offered. Hiding suppresses it from the catalogue listing while
+# leaving get_model() able to resolve it, so agents and published bundles that
+# already reference the model keep working. Reversible, and per-deployment.
+
+def hidden_path() -> Path:
+    return MODELS_DIR / "hidden_models.json"
+
+
+def load_hidden() -> set[str]:
+    p = hidden_path()
+    if not p.exists():
+        return set()
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return set(data) if isinstance(data, list) else set()
+    except (json.JSONDecodeError, OSError):
+        return set()
+
+
+def save_hidden(ids: set[str]) -> None:
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    hidden_path().write_text(json.dumps(sorted(ids), indent=2), encoding="utf-8")
+
+
+def hide(model_id: str) -> bool:
+    ids = load_hidden()
+    if model_id in ids:
+        return False
+    ids.add(model_id)
+    save_hidden(ids)
+    return True
+
+
+def unhide(model_id: str) -> bool:
+    ids = load_hidden()
+    if model_id not in ids:
+        return False
+    ids.discard(model_id)
+    save_hidden(ids)
+    return True
+
+
+def all_models(include_hidden: bool = False) -> list[dict]:
+    """Curated models first, then onboarded ones, each tagged with its source.
+
+    Hidden models are left out unless asked for; `get_model` always searches
+    them, because something already published may still depend on one.
+    """
+    hidden = load_hidden()
+    out = [{**m, "source": "builtin", "hidden": m["id"] in hidden} for m in MODEL_CATALOG]
     known = {m["id"] for m in out}
     for m in load_custom():
         if m.get("id") not in known:
-            out.append({**m, "source": "custom"})
-    return out
+            out.append({**m, "source": "custom", "hidden": m.get("id") in hidden})
+    return out if include_hidden else [m for m in out if not m["hidden"]]
 
 
 def add_custom(entry: dict) -> dict:
@@ -154,7 +203,13 @@ def remove_custom(model_id: str) -> bool:
 
 
 def get_model(model_id: str) -> dict | None:
-    for m in all_models():
+    """Resolve a model id, hidden models included.
+
+    Hiding removes a model from the picker, not from the system: agents and
+    published bundles that already reference it must keep resolving, or
+    hiding one would break everything built on it.
+    """
+    for m in all_models(include_hidden=True):
         if m["id"] == model_id:
             return m
     return None

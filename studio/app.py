@@ -500,6 +500,73 @@ def remove_onboarded(model_id: str, delete_file: bool = False, force: bool = Fal
             "freed_bytes": removed_bytes}
 
 
+@app.delete("/api/catalog/{model_id}/entry")
+def remove_catalog_entry(model_id: str, delete_file: bool = True, force: bool = False):
+    """Drop a model from the catalogue, whichever kind it is.
+
+    An onboarded model is deleted outright. A curated one cannot be — it lives
+    in code — so it is hidden instead: gone from the picker, still resolvable
+    for agents and bundles already built on it, and restorable later.
+    """
+    entry = catalog_mod.get_model(model_id)
+    if not entry:
+        raise HTTPException(404, f"unknown model '{model_id}'")
+
+    use = usage_of(entry)
+    if use["agents"] and not force:
+        raise HTTPException(409, (
+            f"'{model_id}' is selected by {len(use['agents'])} agent(s): "
+            f"{', '.join(use['agents'])}. Point them at another model first, "
+            "or pass force=true."))
+
+    freed = 0
+    if delete_file:
+        path = MODELS_DIR / entry["file"]
+        if path.exists() and loaded_model_file() != entry["file"]:
+            try:
+                freed = path.stat().st_size
+                path.unlink()
+            except OSError:
+                freed = 0
+
+    if entry.get("source") == "custom":
+        catalog_mod.remove_custom(model_id)
+        action = "removed"
+    else:
+        catalog_mod.hide(model_id)
+        action = "hidden"
+    return {"ok": True, "id": model_id, "action": action, "freed_bytes": freed,
+            "still_resolvable": action == "hidden",
+            "note": ("Curated models live in code, so this one is hidden from the "
+                     "catalogue rather than deleted; agents and bundles already using "
+                     "it keep working, and it can be restored."
+                     if action == "hidden" else "Onboarded model deleted.")}
+
+
+@app.post("/api/catalog/{model_id}/restore")
+def restore_catalog_entry(model_id: str):
+    """Put a hidden curated model back in the catalogue."""
+    if not catalog_mod.unhide(model_id):
+        raise HTTPException(404, f"'{model_id}' is not hidden")
+    return {"ok": True, "id": model_id, "action": "restored"}
+
+
+@app.get("/api/catalog/hidden")
+def list_hidden():
+    hidden = catalog_mod.load_hidden()
+    umap = usage_map()
+    out = []
+    for m in catalog_mod.all_models(include_hidden=True):
+        if m["id"] not in hidden:
+            continue
+        entry = dict(m)
+        # Hidden models keep resolving, so what still depends on one matters.
+        entry["usage"] = usage_of(m, umap)
+        entry["downloaded"] = (MODELS_DIR / m["file"]).exists()
+        out.append(entry)
+    return out
+
+
 @app.get("/api/catalog/disk")
 def catalog_disk():
     """What the model store costs and what is left, for the catalog header."""
