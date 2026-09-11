@@ -180,24 +180,46 @@ async function render() {
       </table></div>` : `<div class="empty">Nothing published yet.</div>`}`;
   }
   if (state.view === 'models') {
-    const cat = await api('/api/catalog');
+    const [cat, disk] = await Promise.all([api('/api/catalog'), api('/api/catalog/disk')]);
+    const onServer = cat.filter(c => c.downloaded);
+    const reclaimable = onServer.filter(c => c.can_delete_file && !c.usage.in_use);
     m.innerHTML = `<div class="row"><div class="grow"><h1>Model Catalog</h1>
         <div class="sub">SLMs that fit handheld devices (iPhone 14+ / Galaxy S23+ class, 4-bit GGUF quantization).</div></div>
         <button onclick="toggleOnboard()">${state.onboard ? 'Cancel' : '+ Onboard model'}</button>
       </div>
       <div id="onboard-panel"></div>
-      <div class="panel"><table><tr><th>Model</th><th>Size</th><th>Min device RAM</th><th>Context</th><th>License</th><th>Status</th><th style="text-align:right">Actions</th></tr>
+      <div class="panel" style="padding:14px 20px">
+        <div class="row" style="font-size:12.5px;color:var(--muted)">
+          <div class="grow"><b style="color:var(--text)">${gbytes(disk.models_bytes)}</b> in ${disk.model_files} model file${disk.model_files === 1 ? '' : 's'}
+            · <b style="color:var(--text)">${gbytes(disk.free_bytes)}</b> free on this server</div>
+          ${reclaimable.length
+            ? `<span>${reclaimable.length} unused model${reclaimable.length === 1 ? '' : 's'} holding
+                 ${gbytes(reclaimable.reduce((a, c) => a + c.file_bytes, 0))}</span>`
+            : '<span>nothing unused on disk</span>'}
+        </div>
+      </div>
+      <div class="panel"><table><tr><th>Model</th><th>Size</th><th>Min RAM</th><th>Context</th><th>Used by</th><th>Status</th><th style="text-align:right">Actions</th></tr>
       ${cat.map(c => `<tr><td><b>${esc(c.name)}</b>
           ${c.source === 'custom' ? '<span class="chip blue">onboarded</span>' : ''}
+          ${c.loaded ? '<span class="chip green">loaded</span>' : ''}
           <br><span style="color:var(--muted);font-size:11.5px">${esc(c.notes)}</span></td>
         <td>${c.size_gb || '?'} GB</td><td>${c.min_device_ram_gb} GB</td><td>${(c.context_length/1024).toFixed(0)}k</td>
-        <td style="font-size:12px">${esc(c.license)}</td>
-        <td>${c.downloaded ? '<span class="chip green">on server</span>' : '<span class="chip">on demand</span>'}</td>
+        <td style="font-size:12px">${usageLabel(c.usage)}</td>
+        <td>${c.downloaded
+              ? `<span class="chip green">on server</span><br><span style="color:var(--muted);font-size:11px">${gbytes(c.file_bytes)}</span>`
+              : '<span class="chip">on demand</span>'}</td>
         <td style="text-align:right;white-space:nowrap">
           ${!c.downloaded && c.download_url ? `<button class="ghost small" onclick="cacheModel('${c.id}')">Cache here</button>` : ''}
-          ${c.source === 'custom' ? `<button class="danger-ghost small" onclick="removeModel('${c.id}')">Remove</button>` : ''}
+          ${c.downloaded ? `<button class="danger-ghost small" ${c.loaded ? 'disabled title="loaded by llama-server right now"' : ''}
+              onclick="deleteModelFile('${c.id}')">Delete file</button>` : ''}
+          ${c.can_remove_entry ? `<button class="danger-ghost small" onclick="removeModel('${c.id}')">Remove</button>` : ''}
         </td></tr>`).join('')}
-      </table></div>`;
+      </table>
+      <div style="color:var(--muted);font-size:12px;margin-top:12px">
+        Deleting a file frees disk but keeps the model in the catalogue — it reverts to "on demand"
+        and is fetched again when an agent needs it. Removing drops an onboarded model entirely.
+      </div>
+      </div>`;
     if (state.onboard) renderOnboard();
   }
   if (state.view === 'governance') {
@@ -826,13 +848,64 @@ async function pollModelDownloads() {
   }
 }
 
+const gbytes = (n) => !n ? '0 GB'
+  : n >= 1e9 ? (n / 1e9).toFixed(2) + ' GB' : Math.round(n / 1e6) + ' MB';
+
+function usageLabel(u) {
+  if (!u || !u.in_use) return '<span style="color:var(--accent2)">unused</span>';
+  const bits = [];
+  if (u.agents.length) bits.push(`${u.agents.length} agent${u.agents.length > 1 ? 's' : ''}`);
+  if (u.bundles.length) bits.push(`${u.bundles.length} bundle${u.bundles.length > 1 ? 's' : ''}`);
+  if (u.installed.length) bits.push(`${u.installed.length} installed`);
+  const detail = (u.agents || []).join(', ');
+  return `<span title="${esc(detail)}">${bits.join(' · ')}</span>`;
+}
+
+/** Free the disk space a model's GGUF occupies; the catalogue entry stays. */
+async function deleteModelFile(id) {
+  const c = (await api('/api/catalog')).find(x => x.id === id);
+  if (!c) return toast('Model not found', true);
+  if (!confirm(`Delete the GGUF for "${c.name}"?\n\nFrees ${gbytes(c.file_bytes)}. `
+      + `It stays in the catalogue and is downloaded again when an agent needs it.`)) return;
+  try {
+    const r = await api(`/api/catalog/${id}/file`, { method: 'DELETE' });
+    toast(`Freed ${gbytes(r.freed_bytes)} — ${c.name} is now on demand`);
+    render();
+  } catch (e) {
+    // The server refuses an in-use model unless forced; relay its reason and
+    // let the user decide, rather than silently retrying with force.
+    if (/still used by/i.test(e.message)) {
+      if (!confirm(`${e.message}\n\nDelete it anyway?`)) return;
+      try {
+        const r = await api(`/api/catalog/${id}/file?force=true`, { method: 'DELETE' });
+        toast(`Freed ${gbytes(r.freed_bytes)} — will re-download when needed`);
+        render();
+      } catch (e2) { toast('Delete failed: ' + e2.message, true); }
+    } else {
+      toast('Delete failed: ' + e.message, true);
+    }
+  }
+}
+
+/** Drop an onboarded model from the catalogue, with its file. */
 async function removeModel(id) {
-  if (!confirm(`Remove "${id}" from the catalog and delete its GGUF from this server?\n\nThis cannot be undone.`)) return;
+  if (!confirm(`Remove "${id}" from the catalogue and delete its GGUF?\n\nThis cannot be undone.`)) return;
   try {
     const r = await api(`/api/catalog/custom/${id}?delete_file=true`, { method: 'DELETE' });
-    toast(`Removed ${id}${r.file_deleted ? ' and its GGUF' : ''}`);
+    toast(`Removed ${id}${r.file_deleted ? ` and freed ${gbytes(r.freed_bytes)}` : ''}`);
     render();
-  } catch (e) { toast('Remove failed: ' + e.message, true); }
+  } catch (e) {
+    if (/still used by/i.test(e.message)) {
+      if (!confirm(`${e.message}\n\nRemove anyway?`)) return;
+      try {
+        const r = await api(`/api/catalog/custom/${id}?delete_file=true&force=true`, { method: 'DELETE' });
+        toast(`Removed ${id}${r.file_deleted ? ` and freed ${gbytes(r.freed_bytes)}` : ''}`);
+        render();
+      } catch (e2) { toast('Remove failed: ' + e2.message, true); }
+    } else {
+      toast('Remove failed: ' + e.message, true);
+    }
+  }
 }
 
 render();

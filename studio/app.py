@@ -123,10 +123,20 @@ class SearchIn(BaseModel):
 
 @app.get("/api/catalog")
 def catalog():
+    umap = usage_map()
+    loaded = loaded_model_file()
     out = []
     for m in catalog_mod.all_models():
         entry = dict(m)
-        entry["downloaded"] = (MODELS_DIR / m["file"]).exists()
+        path = MODELS_DIR / m["file"]
+        entry["downloaded"] = path.exists()
+        entry["file_bytes"] = path.stat().st_size if entry["downloaded"] else 0
+        entry["usage"] = usage_of(m, umap)
+        entry["loaded"] = (loaded == m["file"])
+        # What the UI may offer: the file is reclaimable whenever it is here
+        # and not open; the catalog entry only when the model was onboarded.
+        entry["can_delete_file"] = entry["downloaded"] and not entry["loaded"]
+        entry["can_remove_entry"] = (m.get("source") == "custom")
         out.append(entry)
     return out
 
@@ -333,23 +343,173 @@ async def onboard_upload(file: UploadFile = File(...)):
     return {"ok": True, "entry": entry, "gguf": meta, "bytes": size}
 
 
+# ----------------------------------------------------- removing models
+# Two different things get confused here, so they are separate operations:
+#   * deleting the GGUF frees disk but keeps the catalog entry, which simply
+#     reverts to "on demand" — the model can be fetched again later;
+#   * removing the entry drops the model from the catalog, and only onboarded
+#     models can be removed at all, since the curated ones live in code.
+# A built-in's file was previously undeletable through the UI, so a 1 GB model
+# nobody used could not be reclaimed without touching the filesystem by hand.
+
+RUNTIME_URL = "http://127.0.0.1:8200"
+
+
+def usage_map() -> dict[str, dict]:
+    """Who depends on each model, computed in one pass over agents + bundles.
+
+    Per-model lookups would reopen every bundle zip for every row of the
+    catalog; this walks each source once and indexes by model id and by GGUF
+    filename, because agents reference the id while published manifests carry
+    the filename.
+    """
+    out: dict[str, dict] = {}
+
+    def slot(key: str) -> dict:
+        return out.setdefault(key, {"agents": [], "bundles": [], "installed": []})
+
+    conn = db()
+    for aid, cfg_json in conn.execute("SELECT id, config FROM agents"):
+        mid = json.loads(cfg_json).get("model_id")
+        if mid:
+            slot(mid)["agents"].append(aid)
+
+    for p in sorted(BUNDLES_DIR.glob("*.zip")):
+        try:
+            with zipfile.ZipFile(p) as z:
+                model = json.loads(z.read("manifest.json"))["model"]
+        except (zipfile.BadZipFile, KeyError, json.JSONDecodeError, OSError):
+            continue
+        for key in {model.get("id"), model.get("file")}:
+            if key:
+                slot(key)["bundles"].append(p.name)
+
+    try:
+        for a in requests.get(f"{RUNTIME_URL}/api/installed", timeout=3).json():
+            for key in {a["model"].get("id"), a["model"].get("file")}:
+                if key:
+                    slot(key)["installed"].append(a["id"])
+    except (requests.RequestException, ValueError, KeyError):
+        pass   # the Runtime being down must not block catalog browsing
+    return out
+
+
+def usage_of(entry: dict, umap: dict[str, dict] | None = None) -> dict:
+    umap = umap if umap is not None else usage_map()
+    by_id = umap.get(entry["id"], {})
+    by_file = umap.get(entry["file"], {})
+    merged = {k: sorted(set(by_id.get(k, [])) | set(by_file.get(k, [])))
+              for k in ("agents", "bundles", "installed")}
+    merged["in_use"] = any(merged[k] for k in ("agents", "bundles", "installed"))
+    return merged
+
+
+def loaded_model_file() -> str | None:
+    """The GGUF llama-server currently holds open, if any.
+
+    Windows will not unlink a memory-mapped file, so deleting the loaded model
+    fails with a permission error that says nothing useful. Ask first.
+    """
+    try:
+        st = requests.get(f"{RUNTIME_URL}/api/llm/status", timeout=3).json()
+        return st.get("model") if st.get("running") else None
+    except (requests.RequestException, ValueError):
+        return None
+
+
+@app.delete("/api/catalog/{model_id}/file")
+def delete_model_file(model_id: str, force: bool = False):
+    """Delete a model's GGUF from this server, freeing its disk space.
+
+    The catalog entry stays; the model becomes "on demand" again. Refused
+    outright when the file cannot be recovered or cannot be unlinked, and
+    behind `force` when deleting it would merely inconvenience something that
+    can re-download.
+    """
+    entry = catalog_mod.get_model(model_id)
+    if not entry:
+        raise HTTPException(404, f"unknown model '{model_id}'")
+    path = MODELS_DIR / entry["file"]
+    if not path.exists():
+        return {"ok": True, "state": "not on server", "freed_bytes": 0}
+
+    if loaded_model_file() == entry["file"]:
+        raise HTTPException(409, f"{entry['file']} is loaded by llama-server right now — "
+                                 "chat with a different model first, or restart the runtime")
+
+    use = usage_of(entry)
+    recoverable = bool(entry.get("download_url"))
+    if use["in_use"] and not recoverable:
+        # An uploaded model has no CDN copy: this file is the only one there is.
+        raise HTTPException(409, (
+            f"{entry['file']} was uploaded, so this server holds the only copy, and it is "
+            f"still used by {_describe_use(use)}. Delete those first."))
+    if use["in_use"] and not force:
+        raise HTTPException(409, (
+            f"still used by {_describe_use(use)}. Deleting the file frees "
+            f"{path.stat().st_size / 1e9:.2f} GB; it will be downloaded again when needed. "
+            "Pass force=true to go ahead."))
+
+    size = path.stat().st_size
+    try:
+        path.unlink()
+    except PermissionError:
+        raise HTTPException(409, f"{entry['file']} is open by another process and "
+                                 "cannot be deleted right now")
+    except OSError as exc:
+        raise HTTPException(500, f"could not delete {entry['file']}: {str(exc)[:200]}")
+    return {"ok": True, "state": "deleted", "freed_bytes": size,
+            "file": entry["file"], "still_in_catalog": True}
+
+
+def _describe_use(use: dict) -> str:
+    parts = []
+    if use["agents"]:
+        parts.append(f"{len(use['agents'])} agent(s): {', '.join(use['agents'])}")
+    if use["bundles"]:
+        parts.append(f"{len(use['bundles'])} published bundle(s)")
+    if use["installed"]:
+        parts.append(f"{len(use['installed'])} agent(s) installed on the device")
+    return "; ".join(parts) or "nothing"
+
+
 @app.delete("/api/catalog/custom/{model_id}")
-def remove_onboarded(model_id: str, delete_file: bool = False):
+def remove_onboarded(model_id: str, delete_file: bool = False, force: bool = False):
+    """Remove an onboarded model from the catalog, optionally with its file."""
     entry = catalog_mod.get_model(model_id)
     if not entry or entry.get("source") == "builtin":
-        raise HTTPException(404, f"'{model_id}' is not an onboarded model")
-    conn = db()
-    users = [aid for (aid, cfg) in conn.execute("SELECT id, config FROM agents")
-             if json.loads(cfg).get("model_id") == model_id]
-    if users:
-        raise HTTPException(409, f"still used by: {', '.join(users)}")
-    catalog_mod.remove_custom(model_id)
-    removed = False
+        raise HTTPException(404, f"'{model_id}' is a curated model and cannot be "
+                                 "removed from the catalog — delete its file instead")
+    use = usage_of(entry)
+    if use["in_use"] and not force:
+        raise HTTPException(409, f"still used by {_describe_use(use)}")
+
+    removed_bytes = 0
     if delete_file:
         path = MODELS_DIR / entry["file"]
-        removed = path.exists()
-        path.unlink(missing_ok=True)
-    return {"ok": True, "id": model_id, "file_deleted": removed}
+        if path.exists():
+            if loaded_model_file() == entry["file"]:
+                raise HTTPException(409, f"{entry['file']} is loaded by llama-server right now")
+            try:
+                removed_bytes = path.stat().st_size
+                path.unlink()
+            except OSError as exc:
+                raise HTTPException(409, f"could not delete {entry['file']}: {str(exc)[:200]}")
+    catalog_mod.remove_custom(model_id)
+    return {"ok": True, "id": model_id, "file_deleted": bool(removed_bytes),
+            "freed_bytes": removed_bytes}
+
+
+@app.get("/api/catalog/disk")
+def catalog_disk():
+    """What the model store costs and what is left, for the catalog header."""
+    files = [p for p in MODELS_DIR.glob("*.gguf") if p.is_file()]
+    used = sum(p.stat().st_size for p in files)
+    try:
+        free = shutil.disk_usage(MODELS_DIR).free
+    except OSError:
+        free = 0
+    return {"models_bytes": used, "model_files": len(files), "free_bytes": free}
 
 
 def _start_model_download(entry: dict) -> None:
