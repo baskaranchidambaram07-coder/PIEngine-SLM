@@ -53,19 +53,23 @@ the device. Concretely:
 | Cloudflare named tunnel | implemented, not activated | `cloudflare/` renders and passes `cloudflared tunnel ingress validate`; **needs a domain to go live** |
 | Fine-tuning pipeline | built, GPU stage pending | requirement spec (5 requirements, 23 probes) scored against the running system — **stock model 78%**, and the harness reproduced three previously hand-found defects by name; 269 synthetic examples passing leakage/duplication/balance/length/**privacy** gates → job pack. Adapters ship as ~30 MB LoRA on the shared base, gated on a scorecard before publish |
 | Public repo | done | source only (~2.7 MB); weights, toolchains and runtime state excluded |
+| **File attachments + PII Guard** (Journey 2 web) | working, measured | one jpg/jpeg/pdf/txt/md ≤ 5 MB per turn; OCR (Tesseract) for scans and photos; **Qwen3-VL-2B** vision answers on images; on-demand RAG over the file; an opt-in per-agent **PII Guard** guardrail (Studio checkbox, default off; regex + checksums plus an on-device model judge) that refuses any turn whose file or message carries PII/passwords/API keys, showing only the first 3 and last 2 characters — [`docs/attachments-and-pii-guard.md`](docs/attachments-and-pii-guard.md) |
+| Agent delete guard | working | the Studio refuses to delete an agent while the web runtime or any Android handset still holds it (`/api/agents/{id}/installs`); the runtime flags installed agents the Studio has since deleted |
+| **Android app v2.9** — attachments, on-device OCR, on-demand RAG, PII Guard, uninstall, retry of blocked models, **Qwen3-1.7B now loads on handsets** | verified on two handsets: 1.7B loads in 5 s and answers at 13 tok/s; the two-month "needs more memory" failure was a chat-template probe bug in the engine wrapper — see [`docs/android-1.7b-root-cause.md`](docs/android-1.7b-root-cause.md) | one jpg/jpeg/pdf/txt/md ≤ 5 MB per turn; ML Kit OCR for photos and every PDF page (rendered with PdfRenderer); same detector rules as the server (`src/pii.ts`, parity-tested); per-agent guardrail from the manifest; per-agent Uninstall (reports `uninstall` telemetry); optional Qwen3-VL-2B vision behind a ⚙ switch, off by default |
+| Embedding-model catalogue | working | five embedders selectable per agent in the Studio (server ONNX + phone GGUF pairs, parity-measured); KBs re-embed on change; app v3.0 downloads the embedder the bundle names |
+| Automated tests | 95 passing | `venv\Scripts\python -m pytest` — detector vectors, attachment pipeline, guard decisions, chat wiring (model faked) |
 
 ### Pending
 
 | # | Item | Blocked by |
 |---|---|---|
 | 1 | **Activate the named tunnel** — permanent `studio.` / `portal.` hostnames | a Cloudflare account + a domain; then `cloudflare\setup.ps1` (§1c) |
-| 2 | **Qwen3-1.7B on the test handset** — init OOMs after weights load; 0.6B is that device's ceiling | root cause found (compute buffer driven by `n_ubatch`); needs a device with more headroom, or further batch tuning |
 | 3 | **Train the first adapter** — the pipeline around it is built and exercised (spec → synthesis → dataset gate → job pack, and the import/A-B/promotion path behind it); only the gradient step is missing | no GPU and ~4 GB free disk on this server; the job pack is built and runs unchanged on a Colab T4 or any 8 GB NVIDIA box ([`docs/finetuning.md`](docs/finetuning.md)) |
 | 4 | **iOS build** of the same RN app | needs a Mac or macOS CI runner |
 | 5 | **Production APK signing** | release currently uses the stock RN *debug* keystore — must be replaced before real distribution |
 | 6 | **Scale-out retrieval** — sqlite-vec + hybrid BM25/vector past ~10k chunks | not started |
 | 7 | **Bundle signing + encryption at rest, MDM distribution** | not started |
-| 8 | **Automated tests / CI** | none yet; verification to date is manual and end-to-end |
+| 8 | **CI** | tests exist (`pytest`, 67) but nothing runs them automatically |
 
 ---
 
@@ -92,7 +96,7 @@ llama.cpp / llama.rn.
 | Streaming chat | Yes | Yes |
 | Tool calling | Yes, OpenAI-style with typed accessors | Yes, Qwen3 `<tool_call>` convention |
 | Schema-constrained JSON | Yes, grammar-constrained | **No** |
-| Vision / multimodal | Yes | **No** |
+| Vision / multimodal | Yes | **Yes on the server runtime** (Qwen3-VL-2B for attached images); not yet on the handset |
 | Concurrent sessions | Yes, sharing one pass over the weights | One model, one session |
 | OpenAI-compatible local server | Yes, in-process | Only via `llama-server` on the host |
 | **Knowledge base / RAG** | **Not offered** | **Yes** — chunk, embed, ship, retrieve on-device |
@@ -210,6 +214,7 @@ on server boot and survive terminal/session closes. Normally you start nothing.
 | `slm-tunnel` | cloudflared quick tunnel → 8200 (`scripts/start_tunnel.cmd`) | URL in `C:\slm\cloudflared.log` |
 | `slm-cf-tunnel` | cloudflared **named** tunnel → 8100 + 8200 (`cloudflare/run.cmd`) | permanent URLs — see §1c |
 | `slm-gradle-build` | Android APK build (`android_app/run_build.cmd`) | on demand only |
+| *(child of `slm-runtime`)* | `llama-server` for the agent model / for the **vision model** | 8302 / **8303** — started on first use, not a task |
 
 `slm-cf-tunnel` replaces both tunnel tasks above once set up. Until then the
 quick tunnel + ngrok pair keeps working unchanged.
@@ -244,6 +249,15 @@ Select-String -Path C:\slm\cloudflared.log -Pattern "https://[a-z0-9-]+\.tryclou
 > (§1c) and the URL becomes permanent; failing that, app v2.6+ **re-resolves
 > the portal URL by itself** from `GET /api/portal-url` on the Studio's stable
 > domain, so phones recover from a rotation without anyone retyping anything.
+
+**Attachments need Tesseract** (OCR for photos and scanned PDFs): installed at
+`C:\Program Files\Tesseract-OCR` (override with the `TESSERACT_EXE` env var). The
+vision model files (`models/Qwen3-VL-2B-Instruct-Q4_K_M.gguf` + its `mmproj-*.gguf`)
+are checked by `GET /api/capabilities`; without them image turns fall back to OCR only.
+
+**Tests:** `venv\Scripts\python -m pytest` (offline, ~1 min; fixtures from
+`scripts\make_attachment_samples.py`). **Live benchmark:**
+`venv\Scripts\python prototypes\attach_bench.py --agent product-insights`.
 
 **Logs:** `C:\slm\logs\studio.log`, `logs\runtime.log`, `logs\ngrok.log`,
 `C:\slm\cloudflared.log`, `logs\cloudflare-tunnel.log` (named tunnel),

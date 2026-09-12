@@ -213,6 +213,7 @@ evidence. **Status** is one of: **Verified** (exercised end-to-end), **Built**
 | FR-2.4 | Portable knowledge format | One SQLite file per agent: `docs`, `chunks` (text + float32 blob), `kb_meta`; the identical file ships in the bundle and is read unchanged on the phone | Verified |
 | FR-2.5 | Manage the corpus | List documents with chunk counts, delete a document (cascades to its chunks) | Built |
 | FR-2.6 | Test retrieval before publishing | Search endpoint returns ranked chunks with similarity scores, so the author can tune `top_k`/`min_score` against real queries | Verified |
+| FR-2.8 | Choose the embedding model per agent | Studio *Embedding model* panel and *Model Catalog → Embedding models* table: 5 catalogued models (bge small/base/large, all-MiniLM-L6-v2, Nomic Embed v1.5), each present as a fastembed ONNX model on the server and a GGUF on the handset with matching pooling and query/passage prefixes; server-vs-device cosine parity measured 0.998–0.9998 (`prototypes/embedder_parity.py`). Changing an agent's embedder re-embeds its KB; the bundle manifest carries the full descriptor and the app downloads that GGUF. KB dimension is read from the vectors, not assumed | Verified |
 | FR-2.7 | Add knowledge on the handset | Users attach files (≤2 MB, txt/md/csv/log) in the app; chunked and embedded **on the device** into a separate `inline.sqlite`, searched alongside the shipped KB | Built |
 
 > **Retrieval approach.** Brute-force cosine over all chunks — no index. For KBs
@@ -286,6 +287,24 @@ the handset.
 | FR-7.4 | Keep responses fast | Thinking mode disabled by appending `/no_think` to the system prompt | Verified |
 | FR-7.5 | Multi-turn conversation | Full history maintained; KV-cache reuse makes later turns substantially faster (measured 4.1 → 13 tok/s) | Verified |
 | FR-7.6 | Report performance honestly | Per-turn statistics taken from the engine's own timings, separating prompt processing from generation | Verified |
+
+### BC-12 — File attachments, vision, and the PII Guard *(added September 2026)*
+
+| ID | Requirement | As implemented | Status |
+|---|---|---|---|
+| FR-12.1 | Attach one file per turn: jpg, jpeg, pdf, txt, md; ≤ 5 MB | Enforced in the browser and again on the server; type decided by extension **and** magic bytes; 400/413 on refusal | Verified |
+| FR-12.2 | Read scanned pages and photos | pypdf text layer; pages with no text rasterised at 300 dpi (PyMuPDF) and OCR'd with Tesseract 5.5; JPEGs OCR'd after preprocessing; numeric OCR confusions repaired | Verified |
+| FR-12.3 | Answer questions about an image with a vision model | Qwen3-VL-2B in a second `llama-server` (`--mmproj`, port 8303); image downscaled to 1,024 px; OCR transcript passed alongside the pixels | Verified |
+| FR-12.4 | Retrieve from the file on demand | Small files injected whole; larger ones chunked, embedded and searched at question time behind the lexical gate; KB context appended after | Verified |
+| FR-12.5 | Detect PII, passwords, secret and API keys in the file and the message | `core/pii.py`: labelled passwords/secrets, vendor-prefixed keys, JWTs, private keys, cards (Luhn), SSN, Aadhaar (Verhoeff), PAN, IBAN (mod-97), passport, DOB, email, phone; plus an on-device model judge whose spans must occur verbatim | Verified |
+| FR-12.6 | Refuse and mask | Turn refused before any model call; each finding named by category showing only its **first 3 and last 2 characters** (last 1 for values of 5 or fewer) and the sentence "I am not ready to proceed further" | Verified |
+| FR-12.7 | Never leak what was found | API returns masked summaries only; extracted text never leaves the server; refusals logged to telemetry by label only; attachments swept after 24 h | Verified |
+| FR-12.8 | Also protect the answer | Model output scanned and masked in place, with a notice under the bubble | Verified |
+| FR-4.x | Delete only when no device holds the agent | Studio `DELETE /api/agents/{id}` returns 409 while the agent is installed on the web runtime (read from disk) or on an Android handset (telemetry `install` without a later `uninstall`, devices unseen for 90 days ignored); `GET /api/agents/{id}/installs` lists holders and the editor disables Delete with the reason. Runtime marks installed agents the Studio no longer has (`in_studio=false`, chip + Uninstall button) and records `uninstall` telemetry | Verified |
+| FR-12.9 | Guard is opt-in per agent | Studio *Guardrails* panel (checkbox, default off) -> `guardrails.pii` in the bundle manifest; the runtime enforces it on messages, files and answers; off = plain flow. Shown on the agent card, bundle preview, runtime agent list and chat header | Verified |
+| FR-12.10 | Delete only what no device holds | Studio `DELETE /api/agents/{id}` returns 409 while the web runtime (read from disk) or any Android handset (install telemetry with no later uninstall, seen within 90 days) still has the agent; `GET /api/agents/{id}/installs` shows the holders; the runtime lists agents as *removed in Studio* and offers Uninstall, and reports `uninstall` telemetry | Verified |
+
+> Design, measurements and the mobile port plan: [`attachments-and-pii-guard.md`](attachments-and-pii-guard.md).
 
 ### BC-8 — Governance and privacy
 
@@ -405,6 +424,9 @@ grades the result and decides whether it may ship. Design and rationale in
 | POST | `/api/chat` | Streaming chat (SSE) |
 | GET | `/api/published` · `/bundles/{n}` · `/models/{n}` · `/apk` | The full phone-facing surface |
 | POST | `/api/telemetry` | Metadata ingest from handsets |
+| POST / GET / DELETE | `/api/attachments[/{id}]` | Upload (validate → extract/OCR → index → PII Guard) / meta / remove |
+| GET | `/api/capabilities` · `/api/vision/status` | Attachment limits, OCR + vision availability, guard policy |
+| GET / PUT | `/api/guard/policy` | PII Guard judge mode and switches |
 | GET | `/api/device` · `/api/llm/status` | Device data · engine state |
 | GET | `/export/{id}` · `/api/export/{id}/prompt.txt` · `/card.json` | Third-party export |
 
@@ -445,7 +467,7 @@ and any plan should treat them as new work rather than hardening.
 3. Bundle signing, bundle encryption, or encryption of the KB at rest on the device.
 4. MDM / enterprise app-store distribution.
 5. Production APK signing.
-6. Automated tests of any kind, and any CI pipeline.
+6. A CI pipeline. (Automated tests now exist for the attachment/guard subsystem — 67 — but nothing else is covered and nothing runs them automatically.)
 7. Delta/incremental knowledge-base sync — updating an agent re-downloads the bundle.
 8. An evaluation harness gating publication on answer quality.
 9. iOS application.
@@ -460,8 +482,8 @@ and any plan should treat them as new work rather than hardening.
 | R-1 | **The portal is unauthenticated.** Anyone with the URL can list agents and download bundles, models and the APK | Confidential KBs are exposed to anyone holding the link | Open — mitigated only by URL obscurity |
 | R-2 | **Bundles are unsigned and unencrypted.** A KB on a lost device is readable | Data-at-rest exposure | Open |
 | R-3 | **Release APK uses the public debug keystore** | Not distributable through any managed channel; no update-integrity guarantee | Open |
-| R-4 | **Qwen3-1.7B fails to initialise on the test handset.** Root-caused: the compute buffer is driven by `n_ubatch`, not `n_ctx`, so shrinking context alone never reduced peak memory; the device OOMs after weights load | The default catalog model does not run on that class of device; 0.6B is its ceiling | Diagnosed, mitigated by the block-and-guide safety gate |
-| R-5 | **No automated tests.** Every verification to date has been manual | Regressions will not be caught | Open |
+| R-4 | ~~Qwen3-1.7B fails to initialise on the test handset~~ **Resolved 12 Sep 2026.** The failure was not memory: the engine wrapper's chat-template probe threw on the older Qwen3 template inside the 1.7B GGUFs and surfaced as "Unknown error". Fixed by a local engine patch (built from source); 1.7B now runs on the test handsets | The default catalog model runs on the fleet's phones | Closed — see `docs/android-1.7b-root-cause.md` |
+| R-5 | **Thin automated tests.** Only the attachment/PII-Guard subsystem has a suite (67 tests); Studio, publish and Android paths are still verified by hand | Regressions elsewhere will not be caught | Partially mitigated |
 | R-6 | **Retrieval is brute-force** | Degrades past a few thousand chunks | Known trade-off; acceptable at current scale |
 | R-7 | **Answer quality is unmeasured.** No accuracy, groundedness or hallucination benchmark exists | Quality claims rest on demonstration, not measurement | Open |
 | R-8 | **Public URLs rotate** without a customer domain | Handsets need reconfiguration on restart | Mitigated by auto-discovery; fixed permanently by the named tunnel |
