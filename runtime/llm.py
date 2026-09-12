@@ -105,9 +105,13 @@ def stop() -> None:
 atexit.register(stop)
 
 
-def stream_chat(messages: list[dict], generation: dict) -> Iterator[dict]:
+def stream_chat(messages: list[dict], generation: dict, url: str = LLM_URL) -> Iterator[dict]:
     """Stream deltas from llama-server, filtering Qwen3 <think> blocks and
     surfacing <tool_call> payloads as structured events.
+
+    `url` defaults to the agent's text model; runtime/vision.py passes its own
+    server so image turns share this parser (message content may then be the
+    OpenAI list form with an image_url part).
 
     Yields: {"type": "token", "text": str} | {"type": "tool_call", "raw": str, "call": dict}
             | {"type": "stats", ...}
@@ -126,7 +130,7 @@ def stream_chat(messages: list[dict], generation: dict) -> Iterator[dict]:
     # 0.0 unconditionally would silently DISABLE min-p sampling for every agent.
     if generation.get("min_p") is not None:
         payload["min_p"] = float(generation["min_p"])
-    resp = requests.post(f"{LLM_URL}/v1/chat/completions", json=payload, stream=True, timeout=600)
+    resp = requests.post(f"{url}/v1/chat/completions", json=payload, stream=True, timeout=600)
     resp.raise_for_status()
     resp.encoding = "utf-8"  # SSE has no charset header; default latin-1 mangles UTF-8
 

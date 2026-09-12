@@ -38,6 +38,11 @@
   button:disabled{opacity:.5;cursor:not-allowed}
   .store-item{border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:8px;background:var(--panel);box-shadow:var(--shadow)}
   .empty{color:var(--muted);font-size:12px;padding:8px 0}
+  .search-wrap{margin-top:14px}
+  .search{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:10px;color:var(--text);padding:8px 12px;font-size:12.5px;font-family:inherit}
+  .search:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+  .count{font-weight:400;text-transform:none;letter-spacing:0;color:var(--muted);margin-left:4px}
+  mark{background:#FDE68A;color:inherit;border-radius:2px;padding:0 1px}
   /* phone frame */
   .stage{flex:1;display:flex;align-items:center;justify-content:center;padding:16px;min-width:0;background:linear-gradient(160deg,#FAF5FF 0%,#F5F6FA 55%,#EEF0FF 100%)}
   .phone{width:430px;max-width:100%;height:min(880px,calc(100vh - 40px));background:var(--bg);border:1px solid var(--border);border-radius:32px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 60px rgba(30,27,75,.16), 0 8px 20px rgba(30,27,75,.08)}
@@ -54,9 +59,25 @@
   .msg .srcs{margin-top:8px;padding-top:6px;border-top:1px solid var(--border)}
   .src-chip{display:inline-block;background:var(--accent-soft);border:1px solid #DDD6FE;border-radius:6px;padding:1px 8px;font-size:10.5px;color:var(--accent);margin:2px 3px 0 0}
   .stats{font-size:10.5px;color:var(--muted);margin-top:6px}
-  .composer{padding:12px;border-top:1px solid var(--border);background:var(--panel);display:flex;gap:8px}
-  .composer input{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:20px;color:var(--text);padding:9px 15px;font-size:13.5px}
-  .composer input:focus{outline:none;border-color:var(--accent)}
+  .composer{padding:10px 12px 12px;border-top:1px solid var(--border);background:var(--panel);display:flex;flex-direction:column;gap:8px}
+  .composer .row{display:flex;gap:8px;align-items:center}
+  .composer input[type=text]{flex:1;min-width:0;background:var(--bg);border:1px solid var(--border);border-radius:20px;color:var(--text);padding:9px 15px;font-size:13.5px}
+  .composer input[type=text]:focus{outline:none;border-color:var(--accent)}
+  button.attach{background:transparent;border:1px solid var(--border);color:var(--muted);padding:7px 10px;box-shadow:none;font-size:15px;line-height:1}
+  button.attach:hover{border-color:var(--accent);color:var(--accent);filter:none}
+  .att-chip{display:flex;align-items:center;gap:9px;background:var(--accent-soft);border:1px solid #DDD6FE;border-radius:10px;padding:7px 10px;font-size:12px;color:var(--text)}
+  .att-chip.blocked{background:#FEF2F2;border-color:#FECACA}
+  .att-chip.clear{background:#ECFDF5;border-color:#A7F3D0}
+  .att-chip .icon{font-size:18px}
+  .att-chip .body{flex:1;min-width:0}
+  .att-chip .fname{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .att-chip .meta{color:var(--muted);font-size:11px;margin-top:1px}
+  .att-chip .x{cursor:pointer;color:var(--muted);font-weight:700;padding:0 4px;font-size:14px}
+  .att-chip .x:hover{color:var(--danger)}
+  .msg.guard{align-self:flex-start;background:#FFFBEB;border:1px solid #FDE68A;color:#78350F;max-width:92%}
+  .msg.user .att{display:block;font-size:11.5px;opacity:.9;margin-bottom:4px}
+  .src-chip.att{background:#ECFDF5;border-color:#A7F3D0;color:var(--green)}
+  .hint{font-size:10.5px;color:var(--muted);padding:0 2px}
   .welcome{color:var(--muted);text-align:center;margin:auto;padding:30px;font-size:13px;line-height:1.7}
   .spinner{display:inline-block;width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px}
   @keyframes spin{to{transform:rotate(360deg)}}
@@ -80,16 +101,19 @@
 <aside>
   <div class="brand">📱 Device <span>Runtime</span></div>
   <div class="brand-sub">Runs 100% on-device — no cloud LLM</div>
-  <div style="margin-bottom:4px"><a href="/apk" style="color:var(--accent);font-size:12px;text-decoration:none">⬇ Android app (APK) — native runtime</a></div>
+  <h4>Android app downloads</h4>
+  <div id="apks" class="empty">loading…</div>
 
-  <h4>Installed agents</h4>
+  <div class="search-wrap">
+    <input type="search" id="search" class="search" placeholder="🔍 Search agents to select or install…" oninput="onSearch(this.value)" autocomplete="off">
+  </div>
+
+  <h4>Installed agents <span class="count" id="installed-count"></span></h4>
   <div id="installed"></div>
 
-  <h4>Agent store <button class="ghost small" style="float:right" onclick="loadStore()">refresh</button></h4>
+  <h4>Agent store <span class="count" id="store-count"></span><button class="ghost small" style="float:right" onclick="loadStore()">refresh</button></h4>
   <div id="store"></div>
 
-  <h4>Device data (created by tools)</h4>
-  <div id="device" class="device-list"></div>
 </aside>
 
 <div class="stage">
@@ -102,8 +126,14 @@
       <div class="welcome">Install an agent from the store,<br>select it, and chat — even in airplane mode.<br><br>🔒 Prompts, documents and answers<br>never leave the device.</div>
     </div>
     <div class="composer">
-      <input id="input" placeholder="Ask your agent…" onkeydown="if(event.key==='Enter')send()" disabled>
-      <button id="send-btn" onclick="send()" disabled>➤</button>
+      <div id="att-row" hidden></div>
+      <div class="row">
+        <input type="file" id="file" accept=".jpg,.jpeg,.pdf,.txt,.md" hidden onchange="onFileChosen(event)">
+        <button class="attach" id="attach-btn" title="Attach one file — jpg, jpeg, pdf, txt or md, up to 5 MB" onclick="$('file').click()" disabled>📎</button>
+        <input type="text" id="input" placeholder="Ask your agent…" onkeydown="if(event.key==='Enter')send()" disabled>
+        <button id="send-btn" onclick="send()" disabled>➤</button>
+      </div>
+      <div class="hint" id="hint" hidden></div>
     </div>
   </div>
 </div>
@@ -116,7 +146,92 @@ let toastTimer;
 function toast(msg, err=false){ const t=$('toast'); t.textContent=msg; t.className='toast show'+(err?' err':'');
   clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.className='toast',3500); }
 
-let state = { agents:[], current:null, history:[], busy:false };
+let state = { agents:[], current:null, history:[], busy:false, attachment:null, caps:null };
+
+// ---- attachments (one file per turn; validated here AND on the server)
+const ATT = { exts:['.jpg','.jpeg','.pdf','.txt','.md'], maxBytes:5*1024*1024 };
+const fmtKB = b => b >= 1048576 ? (b/1048576).toFixed(1)+' MB' : Math.max(1, Math.round(b/1024))+' KB';
+
+async function loadApks(){
+  const el = $('apks');
+  try {
+    const apks = await api('/api/apks');
+    if (!apks.length) { el.innerHTML = '<div class="empty">No APK built yet.</div>'; return; }
+    el.className = '';
+    el.innerHTML = apks.map(a => `
+      <div class="store-item" style="padding:10px 12px">
+        <a href="${a.url}" style="color:var(--accent);font-weight:600;font-size:12.5px;text-decoration:none">⬇ ${esc(a.version ? 'Enterprise Agents ' + a.version.split(' ')[0] : a.name)}</a>
+        ${a.current ? '<span class="chip green" style="margin-left:6px">current</span>' : ''}
+        <div style="font-size:11px;color:var(--muted);margin-top:3px">${esc(a.label || a.name)}</div>
+        <div style="font-size:10.5px;color:var(--muted)">${(a.bytes/1048576).toFixed(1)} MB · built ${esc(a.modified.replace('T',' '))}${a.version ? ' · ' + esc(a.version) : ''}</div>
+      </div>`).join('');
+  } catch (e) { el.innerHTML = `<div class="empty">Downloads unavailable: ${esc(e.message)}</div>`; }
+}
+
+async function loadCaps(){
+  try { state.caps = await api('/api/capabilities'); } catch { state.caps = null; }
+}
+
+async function onFileChosen(e){
+  const files = e.target.files; const list = files ? Array.from(files) : [];
+  e.target.value = '';                       // allow re-choosing the same file later
+  if (!list.length) return;
+  if (list.length > 1) return toast('Attach one file at a time', true);
+  const f = list[0];
+  const ext = ('.' + f.name.split('.').pop()).toLowerCase();
+  if (!ATT.exts.includes(ext)) return toast(`${ext} is not supported — jpg, jpeg, pdf, txt or md only`, true);
+  if (f.size > ATT.maxBytes) return toast(`${(f.size/1048576).toFixed(1)} MB is over the 5 MB limit`, true);
+  if (!f.size) return toast('That file is empty', true);
+  if (state.attachment) removeAttachment(false);
+  state.attachment = { name:f.name, bytes:f.size, status:'uploading', ext };
+  renderAttachment();
+  const fd = new FormData(); fd.append('file', f); if (state.current) fd.append('agent_id', state.current);
+  try {
+    const r = await fetch('/api/attachments', { method:'POST', body:fd });
+    if (!r.ok) { let d; try { d = (await r.json()).detail; } catch { d = r.statusText; } throw new Error(d); }
+    state.attachment = await r.json();
+    renderAttachment();
+    const g = state.attachment.guard;
+    if (g && g.blocked) addMsg('guard', esc(g.message));
+    else if (state.attachment.status === 'no-text')
+      toast(state.attachment.kind === 'image' ? 'No text found by OCR — the vision model will read the image directly'
+                                              : 'No readable text could be extracted from this file', true);
+    else toast(`Attached ${state.attachment.name} — ${state.attachment.chunks} chunk${state.attachment.chunks===1?'':'s'}${state.attachment.ocr_used?' (OCR)':''}${g && g.enabled === false ? '' : ', PII Guard: clear'}`);
+  } catch(err) {
+    state.attachment = null; renderAttachment();
+    toast('Attachment failed: ' + err.message, true);
+  }
+}
+
+function renderAttachment(){
+  const row = $('att-row'); const a = state.attachment;
+  if (!a) { row.hidden = true; row.innerHTML = ''; return; }
+  const icon = a.kind === 'image' || ['.jpg','.jpeg'].includes(a.ext) ? '🖼️' : a.kind === 'pdf' || a.ext === '.pdf' ? '📄' : '📝';
+  let cls = '', meta = '';
+  if (a.status === 'uploading') meta = '<span class="spinner"></span> reading, indexing and scanning…';
+  else {
+    const g = a.guard || {};
+    cls = g.blocked ? 'blocked' : 'clear';
+    const parts = [fmtKB(a.bytes)];
+    if (a.pages > 1) parts.push(`${a.pages} pages`);
+    if (a.ocr_used) parts.push(`OCR ×${a.ocr_pages}`);
+    parts.push(a.status === 'no-text' ? 'no text' : `${a.chunks} chunk${a.chunks===1?'':'s'}${a.small?' (whole file used)':''}`);
+    parts.push(g.enabled === false ? '🛡 PII Guard: off for this agent'
+             : g.blocked ? '🛡 PII Guard: blocked' : `🛡 PII Guard: clear${g.judged ? ' (regex + model)' : ''}`);
+    meta = parts.map(esc).join(' · ');
+  }
+  row.hidden = false;
+  row.innerHTML = `<div class="att-chip ${cls}"><span class="icon">${icon}</span>
+    <div class="body"><div class="fname" title="${esc(a.name)}">${esc(a.name)}</div><div class="meta">${meta}</div></div>
+    <span class="x" title="Remove attachment" onclick="removeAttachment()">✕</span></div>`;
+}
+
+function removeAttachment(announce=true){
+  const a = state.attachment;
+  if (a && a.id) fetch('/api/attachments/' + a.id, { method:'DELETE' }).catch(()=>{});
+  state.attachment = null; renderAttachment();
+  if (announce && a) toast('Attachment removed');
+}
 
 async function api(path, opts={}) {
   if (opts.json){ opts.body=JSON.stringify(opts.json); opts.headers={'Content-Type':'application/json'}; delete opts.json; }
@@ -125,21 +240,26 @@ async function api(path, opts={}) {
   return r.json();
 }
 
+// ---- search: one box filters both the installed list and the store, on
+// name, description, id and model name. Matches are highlighted.
+state.filter = '';
+function onSearch(v){ state.filter = (v || '').trim().toLowerCase(); renderInstalled(); renderStore(); }
+function matches(a){
+  if (!state.filter) return true;
+  const hay = [a.name, a.description, a.id, a.model && a.model.name].filter(Boolean).join(' ').toLowerCase();
+  return state.filter.split(/\s+/).every(w => hay.includes(w));
+}
+function hi(text){
+  const s = esc(text);
+  if (!state.filter) return s;
+  const words = state.filter.split(/\s+/).filter(Boolean).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  return s.replace(new RegExp('(' + words.join('|') + ')', 'gi'), '<mark>$1</mark>');
+}
+function countLabel(shown, total){ return total ? (state.filter ? `${shown} of ${total}` : `${total}`) : ''; }
+
 async function loadInstalled() {
   state.agents = await api('/api/installed');
-  const el = $('installed');
-  el.innerHTML = state.agents.length ? state.agents.map(a => `
-    <div class="agent-item ${state.current===a.id?'sel':''}" onclick="selectAgent('${a.id}')">
-      <div class="name">${esc(a.name)} <span style="color:var(--muted);font-weight:400">v${a.version}</span></div>
-      <div class="info">${esc(a.model.name)} · ${a.rag.chunks||0} KB chunks · ${a.tools.length} tools</div>
-      <div>
-        ${a.model_state==='ready' ? '<span class="chip green">✓ offline-ready</span>'
-          : a.model_state==='downloading' ? '<span class="chip warn">model downloading…</span>'
-          : '<span class="chip warn">model missing</span>'}
-      </div>
-      ${a.download && a.download.total && a.model_state==='downloading' ? `<div class="progress"><div style="width:${(100*a.download.done/a.download.total).toFixed(0)}%"></div></div>` : ''}
-      <div style="margin-top:7px"><a href="/export/${a.id}" target="_blank" onclick="event.stopPropagation()" style="color:var(--accent);font-size:11.5px;text-decoration:none">📲 Get on phone (PocketPal / ChatterUI) →</a></div>
-    </div>`).join('') : '<div class="empty">Nothing installed yet.</div>';
+  renderInstalled();
   if (state.agents.some(a => a.model_state === 'downloading')) setTimeout(loadInstalled, 3000);
   // phone convenience: land straight in chat when one agent is ready
   if (!state.current) {
@@ -148,18 +268,50 @@ async function loadInstalled() {
   }
 }
 
+function renderInstalled() {
+  const el = $('installed');
+  const shown = state.agents.filter(matches);
+  $('installed-count').textContent = countLabel(shown.length, state.agents.length);
+  if (!state.agents.length) { el.innerHTML = '<div class="empty">Nothing installed yet.</div>'; return; }
+  if (!shown.length) { el.innerHTML = `<div class="empty">No installed agent matches “${esc(state.filter)}”.</div>`; return; }
+  el.innerHTML = shown.map(a => `
+    <div class="agent-item ${state.current===a.id?'sel':''}" onclick="selectAgent('${a.id}')">
+      <div class="name">${hi(a.name)} <span style="color:var(--muted);font-weight:400">v${a.version}</span></div>
+      <div class="info">${esc(a.model.name)} · ${a.rag.chunks||0} KB chunks · ${a.tools.length} tools${a.guardrails && a.guardrails.pii ? ' · 🛡 PII Guard' : ''}</div>
+      <div>
+        ${a.model_state==='ready' ? '<span class="chip green">✓ offline-ready</span>'
+          : a.model_state==='downloading' ? '<span class="chip warn">model downloading…</span>'
+          : '<span class="chip warn">model missing</span>'}
+        ${a.in_studio === false ? '<span class="chip warn" title="The Studio no longer has this agent; it keeps working here until you uninstall it">removed in Studio</span>' : ''}
+        <button class="ghost small" style="float:right" onclick="event.stopPropagation();uninstall('${a.id}','${esc(a.name).replace(/'/g,'&#39;')}')">uninstall</button>
+      </div>
+      ${a.download && a.download.total && a.model_state==='downloading' ? `<div class="progress"><div style="width:${(100*a.download.done/a.download.total).toFixed(0)}%"></div></div>` : ''}
+      <div style="margin-top:7px"><a href="/export/${a.id}" target="_blank" onclick="event.stopPropagation()" style="color:var(--accent);font-size:11.5px;text-decoration:none">📲 Get on phone (PocketPal / ChatterUI) →</a></div>
+    </div>`).join('');
+}
+
 async function loadStore() {
-  const store = await api('/api/store');
+  state.store = await api('/api/store');
+  renderStore();
+}
+
+function renderStore() {
+  const store = state.store;
   const el = $('store');
-  if (!store.online) { el.innerHTML = `<div class="empty">${esc(store.note)}</div>`; return; }
-  el.innerHTML = store.agents.length ? store.agents.map(p => `
+  if (!store) return;
+  if (!store.online) { $('store-count').textContent = ''; el.innerHTML = `<div class="empty">${esc(store.note)}</div>`; return; }
+  const shown = store.agents.filter(matches);
+  $('store-count').textContent = countLabel(shown.length, store.agents.length);
+  if (!store.agents.length) { el.innerHTML = '<div class="empty">Store is empty — publish an agent from the Studio.</div>'; return; }
+  if (!shown.length) { el.innerHTML = `<div class="empty">No agent in the store matches “${esc(state.filter)}”.</div>`; return; }
+  el.innerHTML = shown.map(p => `
     <div class="store-item">
-      <div class="name" style="font-weight:600;font-size:13px">${esc(p.name)} <span style="color:var(--muted);font-weight:400">v${p.version}</span></div>
-      <div style="font-size:11px;color:var(--muted);margin:3px 0 8px">${esc(p.description)||''}<br>
+      <div class="name" style="font-weight:600;font-size:13px">${hi(p.name)} <span style="color:var(--muted);font-weight:400">v${p.version}</span></div>
+      <div style="font-size:11px;color:var(--muted);margin:3px 0 8px">${hi(p.description||'')}<br>
         bundle ${(p.bundle_bytes/1024).toFixed(0)} KB · model ${p.model.size_gb} GB · ${p.kb.chunks} chunks · ${p.tools} tools</div>
       ${p.state==='installed' ? '<span class="chip green">installed</span>'
         : `<button class="small ${p.state==='update'?'':'green'}" onclick="install('${p.id}')">${p.state==='update'?'Update to v'+p.version:'Install'}</button>`}
-    </div>`).join('') : '<div class="empty">Store is empty — publish an agent from the Studio.</div>';
+    </div>`).join('');
 }
 
 async function install(id) {
@@ -170,15 +322,21 @@ async function install(id) {
   } catch(e){ toast('Install failed: '+e.message, true); }
 }
 
-async function loadDevice() {
-  const d = await api('/api/device');
-  $('device').innerHTML = `
-    <b style="color:var(--text)">Action items</b>
-    ${d.action_items.length ? '<ul>'+d.action_items.map(a=>`<li>${esc(a.title)} — ${esc(a.owner)}, due ${esc(a.due_date)}</li>`).join('')+'</ul>' : '<div class="empty">none yet</div>'}
-    <b style="color:var(--text)">Email outbox</b>
-    ${d.outbox.length ? '<ul>'+d.outbox.map(o=>`<li>"${esc(o.subject)}" → ${esc(o.to)} <i>(${esc(o.status)})</i></li>`).join('')+'</ul>' : '<div class="empty">none yet</div>'}
-    <b style="color:var(--text)">Today's calendar</b>
-    <ul>${d.calendar.map(c=>`<li>${esc(c.time)} — ${esc(c.title)}</li>`).join('')}</ul>`;
+async function uninstall(id, name) {
+  if (!confirm(`Uninstall "${name}" from this device?\n\nThe agent's bundle and knowledge base are removed here; the shared model file stays. You can reinstall it from the store while the Studio still publishes it.`)) return;
+  try {
+    await api('/api/installed/' + id, { method:'DELETE' });
+    if (state.current === id) {
+      state.current = null; state.history = [];
+      $('ph-title').textContent = 'Offline Enterprise Agent';
+      $('ph-status').innerHTML = '<span class="dot warn"></span>no agent selected';
+      $('msgs').innerHTML = '<div class="welcome">Select an installed agent to chat.</div>';
+      $('input').disabled = true; $('send-btn').disabled = true; $('attach-btn').disabled = true;
+      if (state.attachment) removeAttachment(false);
+    }
+    toast(`Uninstalled ${name}`);
+    await loadInstalled(); await loadStore();
+  } catch(e){ toast('Uninstall failed: ' + e.message, true); }
 }
 
 function selectAgent(id) {
@@ -187,9 +345,11 @@ function selectAgent(id) {
   if (a.model_state!=='ready') return toast('Model still downloading to device', true);
   state.current = id; state.history = [];
   $('ph-title').textContent = a.name;
-  $('ph-status').innerHTML = `<span class="dot"></span>on-device · ${esc(a.model.name)} · offline-ready`;
-  $('msgs').innerHTML = `<div class="welcome">🔒 ${esc(a.name)} is loaded from its bundle.<br>Knowledge base: ${a.rag.chunks||0} chunks · Tools: ${a.tools.map(esc).join(', ')||'none'}<br><br>Ask a question — first response loads the model into RAM (like opening the app on your phone).</div>`;
-  $('input').disabled = false; $('send-btn').disabled = false;
+  const pii = !!(a.guardrails && a.guardrails.pii);
+  $('ph-status').innerHTML = `<span class="dot"></span>on-device · ${esc(a.model.name)} · offline-ready${pii ? ' · 🛡 PII Guard active' : ''}`;
+  $('msgs').innerHTML = `<div class="welcome">🔒 ${esc(a.name)} is loaded from its bundle.<br>Knowledge base: ${a.rag.chunks||0} chunks · Tools: ${a.tools.map(esc).join(', ')||'none'}<br><br>Ask a question — first response loads the model into RAM (like opening the app on your phone).${pii ? '<br><br>🛡 PII Guard is active.' : ''}</div>`;
+  $('input').disabled = false; $('send-btn').disabled = false; $('attach-btn').disabled = false;
+  if (state.attachment) removeAttachment(false);
   loadInstalled();
 }
 
@@ -206,17 +366,20 @@ async function send() {
   const inp = $('input');
   const text = inp.value.trim();
   if (!text || !state.current || state.busy) return;
+  const att = state.attachment;
+  if (att && att.status === 'uploading') return toast('Wait for the attachment to finish processing', true);
+  if (att && att.guard && att.guard.blocked) return toast('PII Guard blocked this file — remove it to continue', true);
   inp.value = '';
   state.busy = true; $('send-btn').disabled = true;
-  addMsg('user', esc(text));
+  addMsg('user', (att ? `<span class="att">📎 ${esc(att.name)}</span>` : '') + esc(text));
   state.history.push({ role:'user', content:text });
 
-  let bot = addMsg('bot', '<span class="spinner"></span> <span style="color:var(--muted);font-size:12px">thinking on-device…</span>');
-  let answer = '', srcs = [], stats = null;
+  let bot = addMsg('bot', '<span class="spinner"></span> <span class="st" style="color:var(--muted);font-size:12px">thinking on-device…</span>');
+  let answer = '', srcs = [], stats = null, guarded = false, redacted = null;
 
   try {
     const resp = await fetch('/api/chat', { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ agent_id: state.current, messages: state.history }) });
+      body: JSON.stringify({ agent_id: state.current, messages: state.history, attachment_id: att ? att.id : null }) });
     if (!resp.ok) { let d; try{ d=(await resp.json()).detail; }catch{ d=resp.statusText; } throw new Error(d); }
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
@@ -232,6 +395,11 @@ async function send() {
         const ev = JSON.parse(line.slice(6));
         if (ev.type === 'token') { answer += ev.text; renderBot(); }
         else if (ev.type === 'sources') srcs = ev.items;
+        else if (ev.type === 'status') { const st = bot.querySelector('.st'); if (st) st.textContent = ev.text + '…'; }
+        else if (ev.type === 'guard') {          // PII Guard refused the turn — no model ran
+          guarded = true; bot.className = 'msg guard'; bot.innerHTML = esc(ev.text);
+        }
+        else if (ev.type === 'redact') { redacted = ev.summary; answer = ev.text; renderBot(); }
         else if (ev.type === 'tool') {
           addMsg('tool', `⚙ ${esc(ev.name)}(${esc(JSON.stringify(ev.args))})\n→ ${esc(JSON.stringify(ev.result).slice(0,300))}`);
           bot = addMsg('bot', '<span class="spinner"></span>'); answer='';
@@ -247,14 +415,18 @@ async function send() {
         .replace(/^- /gm, '• ');
       $('msgs').scrollTop = $('msgs').scrollHeight;
     }
-    renderBot();
-    if (!answer.trim()) bot.innerHTML = '<i style="color:var(--muted)">(no text response)</i>';
-    let extra = '';
-    if (srcs.length) extra += `<div class="srcs">${srcs.map(s=>`<span class="src-chip">📄 ${esc(s.doc)} #${s.chunk} · ${s.score}</span>`).join('')}</div>`;
-    if (stats) extra += `<div class="stats">${stats.tokens} tokens @ ${stats.tok_per_sec} tok/s on-device${stats.prefill_tokens ? ` · prompt ${stats.prefill_tokens} tok @ ${stats.prefill_per_sec}/s` : ''}</div>`;
-    bot.innerHTML += extra;
-    state.history.push({ role:'assistant', content:answer });
-    loadDevice();
+    if (guarded) {
+      state.history.push({ role:'assistant', content:'[PII Guard refused this request]' });
+    } else {
+      renderBot();
+      if (!answer.trim()) bot.innerHTML = '<i style="color:var(--muted)">(no text response)</i>';
+      let extra = '';
+      if (srcs.length) extra += `<div class="srcs">${srcs.map(s=>`<span class="src-chip ${s.kind==='attachment'?'att':''}">${s.kind==='attachment'?'📎':'📄'} ${esc(s.doc)} #${s.chunk} · ${s.score}</span>`).join('')}</div>`;
+      if (redacted) extra += `<div class="stats" style="color:var(--warn)">🛡 PII Guard masked ${redacted.map(r=>esc(r.label)).join(', ')} in this answer</div>`;
+      if (stats) extra += `<div class="stats">${stats.tokens} tokens @ ${stats.tok_per_sec} tok/s on-device${stats.prefill_tokens ? ` · prompt ${stats.prefill_tokens} tok @ ${stats.prefill_per_sec}/s` : ''}${stats.model ? ` · ${esc(stats.model)}` : ''}</div>`;
+      bot.innerHTML += extra;
+      state.history.push({ role:'assistant', content:answer });
+    }
   } catch(e) {
     bot.innerHTML = `<span style="color:var(--danger)">⚠ ${esc(e.message)}</span>`;
   }
@@ -262,7 +434,7 @@ async function send() {
   $('msgs').scrollTop = $('msgs').scrollHeight;
 }
 
-loadInstalled(); loadStore(); loadDevice();
+loadInstalled(); loadStore(); loadCaps(); loadApks();
 </script>
 </body>
 </html>

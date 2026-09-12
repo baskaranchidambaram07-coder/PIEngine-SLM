@@ -75,3 +75,6 @@ scripts/start_studio_tunnel.cmd
 finetune/reports/
 finetune/jobs/
 finetune/datasets/*.jsonl
+
+# Test cache.
+.pytest_cache/

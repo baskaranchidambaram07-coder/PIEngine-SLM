@@ -1,0 +1,16 @@
+INVOICE INV-2026-0912
+Date: 12 September 2026        Due: 30 September 2026
+Supplier: Nandini Office Supplies Pvt Ltd, Bengaluru
+Bill to: Acme Corp — Programme Office, purchase order PO-77120
+
+Item                              Qty     Unit       Amount
+A4 copier paper (box of 5)         12   INR 1,150   INR 13,800
+Whiteboard markers (pack of 10)     6   INR   420   INR  2,520
+Laser toner CF287A                  2   INR 6,900   INR 13,800
+
+Subtotal                                             INR 30,120
+GST 18%                                              INR  5,422
+Total due                                            INR 35,542
+Total in USD at 0.0562                               $1,999.00
+
+Payment terms: 15 days net. Reference 4500012345 on your remittance.

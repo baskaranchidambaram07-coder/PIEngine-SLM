@@ -1,0 +1,8 @@
+Vendor onboarding form (draft)
+
+Primary contact: Priya Sharma
+Email: priya.sharma@example.com
+Mobile: +91 98765 43210
+Backup contact email: ops-desk@example.org
+
+Please keep this sheet internal.

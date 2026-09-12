@@ -1,0 +1,477 @@
+{
+  "agent": "product-insights",
+  "policy": {
+    "judge": "attachments",
+    "judge_upload_chunks": 2,
+    "judge_query_chunks": 4,
+    "judge_max_tokens": 256,
+    "judge_max_chars": 3000,
+    "block_names": false,
+    "block_kinds": [
+      "secret",
+      "identity",
+      "contact"
+    ],
+    "redact_output": true
+  },
+  "vision": {
+    "available": true,
+    "running": false,
+    "model": "Qwen3-VL 2B (Q4_K_M)",
+    "file": "Qwen3-VL-2B-Instruct-Q4_K_M.gguf",
+    "mmproj": "mmproj-Qwen3-VL-2B-Instruct-Q8_0.gguf",
+    "port": 8303,
+    "max_image_side": 1024,
+    "missing": []
+  },
+  "files": [
+    {
+      "file": "clean-invoice.txt",
+      "run": 0,
+      "upload_s": 8.9,
+      "verdict": "clear",
+      "expected": "clear",
+      "verdict_ok": true,
+      "labels": [],
+      "judged": true,
+      "judge_note": "judge: 0 kept, 0 dropped (not in text / off-policy)",
+      "timings_ms": {
+        "extract": 1,
+        "ocr": 0,
+        "index": 1,
+        "guard": 8865
+      },
+      "chunks": 1,
+      "pages": 0,
+      "ocr_pages": 0,
+      "text_chars": 767,
+      "questions": [
+        {
+          "answer": "The invoice number is INV-2026-0912, and the total due in INR is INR 35,542.",
+          "total_s": 23.5,
+          "first_token_s": 19.5,
+          "tok_per_sec": 8.2,
+          "prefill_tokens": 529,
+          "tokens": 39,
+          "model": null,
+          "blocked": false,
+          "guard_text": null,
+          "error": null,
+          "statuses": [
+            "ready",
+            "PII Guard reviewing your message"
+          ],
+          "question": "What is the invoice number and the total due in INR?",
+          "ok": true
+        },
+        {
+          "answer": "The payment terms are 15 days net.",
+          "total_s": 16.9,
+          "first_token_s": 15.8,
+          "tok_per_sec": 8.1,
+          "prefill_tokens": 623,
+          "tokens": 15,
+          "model": null,
+          "blocked": false,
+          "guard_text": null,
+          "error": null,
+          "statuses": [
+            "ready",
+            "PII Guard reviewing your message"
+          ],
+          "question": "What are the payment terms?",
+          "ok": true
+        }
+      ]
+    },
+    {
+      "file": "clean-notes.md",
+      "run": 0,
+      "upload_s": 5.0,
+      "verdict": "clear",
+      "expected": "clear",
+      "verdict_ok": true,
+      "labels": [],
+      "judged": true,
+      "judge_note": "judge: 0 kept, 0 dropped (not in text / off-policy); judge: 0 kept, 0 dropped (not in text / off-policy)",
+      "timings_ms": {
+        "extract": 1,
+        "ocr": 0,
+        "index": 0,
+        "guard": 4982
+      },
+      "chunks": 4,
+      "pages": 0,
+      "ocr_pages": 0,
+      "text_chars": 659,
+      "questions": [
+        {
+          "answer": "The Phase 2 rollout date was decided to be 6 October 2026, allowing UAT to finish.",
+          "total_s": 22.9,
+          "first_token_s": 20.3,
+          "tok_per_sec": 8.2,
+          "prefill_tokens": 488,
+          "tokens": 30,
+          "model": null,
+          "blocked": false,
+          "guard_text": null,
+          "error": null,
+          "statuses": [
+            "ready",
+            "PII Guard reviewing your message",
+            "PII Guard reviewing the document"
+          ],
+          "question": "What was decided about the Phase 2 rollout date?",
+          "ok": true
+        },
+        {
+          "answer": "The payment gateway risk is owned by the PMO.",
+          "total_s": 18.4,
+          "first_token_s": 17.2,
+          "tok_per_sec": 7.9,
+          "prefill_tokens": 658,
+          "tokens": 16,
+          "model": null,
+          "blocked": false,
+          "guard_text": null,
+          "error": null,
+          "statuses": [
+            "ready",
+            "PII Guard reviewing your message"
+          ],
+          "question": "Who owns the payment gateway risk?",
+          "ok": true
+        }
+      ]
+    },
+    {
+      "file": "clean-brief.pdf",
+      "run": 0,
+      "upload_s": 5.3,
+      "verdict": "clear",
+      "expected": "clear",
+      "verdict_ok": true,
+      "labels": [],
+      "judged": true,
+      "judge_note": "judge: 0 kept, 0 dropped (not in text / off-policy)",
+      "timings_ms": {
+        "extract": 156,
+        "ocr": 0,
+        "index": 0,
+        "guard": 5093
+      },
+      "chunks": 1,
+      "pages": 1,
+      "ocr_pages": 0,
+      "text_chars": 700,
+      "questions": [
+        {
+          "answer": "The attached document mentions three pilot sites planned for Q4 2026: Pune, Chennai, and Kochi.",
+          "total_s": 23.9,
+          "first_token_s": 20.9,
+          "tok_per_sec": 8.3,
+          "prefill_tokens": 817,
+          "tokens": 30,
+          "model": null,
+          "blocked": false,
+          "guard_text": null,
+          "error": null,
+          "statuses": [
+            "ready",
+            "PII Guard reviewing your message"
+          ],
+          "question": "How many pilot sites are planned and where?",
+          "ok": true
+        },
+        {
+          "answer": "Success means a 20% reduction in report turnaround time and no inspection blocked by connectivity.",
+          "total_s": 9.4,
+          "first_token_s": 7.3,
+          "tok_per_sec": 9.3,
+          "prefill_tokens": 236,
+          "tokens": 24,
+          "model": null,
+          "blocked": false,
+          "guard_text": null,
+          "error": null,
+          "statuses": [
+            "ready",
+            "PII Guard reviewing your message"
+          ],
+          "question": "What does success mean for the pilot?",
+          "ok": true
+        }
+      ]
+    },
+    {
+      "file": "scanned-policy.pdf",
+      "run": 0,
+      "upload_s": 6.1,
+      "verdict": "clear",
+      "expected": "clear",
+      "verdict_ok": true,
+      "labels": [],
+      "judged": true,
+      "judge_note": "judge: 0 kept, 0 dropped (not in text / off-policy)",
+      "timings_ms": {
+        "extract": 1728,
+        "ocr": 1723,
+        "index": 0,
+        "guard": 4286
+      },
+      "chunks": 1,
+      "pages": 1,
+      "ocr_pages": 1,
+      "text_chars": 538,
+      "questions": [
+        {
+          "answer": "2. Notice. Changes to a standing remote-work pattern require 30 days written notice to the line manager and HR.",
+          "total_s": 22.3,
+          "first_token_s": 19.7,
+          "tok_per_sec": 8.1,
+          "prefill_tokens": 788,
+          "tokens": 30,
+          "model": null,
+          "blocked": false,
+          "guard_text": null,
+          "error": null,
+          "statuses": [
+            "ready",
+            "PII Guard reviewing your message"
+          ],
+          "question": "How many days of notice are needed to change a remote-work pattern?",
+          "ok": true
+        },
+        {
+          "answer": "According to the REMOTE WORK POLICY, eligible employees may work remotely up to three days a week.",
+          "total_s": 4.9,
+          "first_token_s": 2.9,
+          "tok_per_sec": 10.1,
+          "prefill_tokens": 17,
+          "tokens": 26,
+          "model": null,
+          "blocked": false,
+          "guard_text": null,
+          "error": null,
+          "statuses": [
+            "ready",
+            "PII Guard reviewing your message"
+          ],
+          "question": "How many days a week can eligible employees work remotely?",
+          "ok": true
+        }
+      ]
+    },
+    {
+      "file": "clean-receipt.jpg",
+      "run": 0,
+      "upload_s": 5.4,
+      "verdict": "clear",
+      "expected": "clear",
+      "verdict_ok": true,
+      "labels": [],
+      "judged": true,
+      "judge_note": "judge: 0 kept, 0 dropped (not in text / off-policy)",
+      "timings_ms": {
+        "extract": 880,
+        "ocr": 879,
+        "index": 0,
+        "guard": 4487
+      },
+      "chunks": 1,
+      "pages": 1,
+      "ocr_pages": 1,
+      "text_chars": 227,
+      "questions": [
+        {
+          "answer": "The total on this receipt is $42.75$.",
+          "total_s": 48.8,
+          "first_token_s": 47.5,
+          "tok_per_sec": 8.5,
+          "prefill_tokens": 687,
+          "tokens": 14,
+          "model": "Qwen3-VL 2B (Q4_K_M)",
+          "blocked": false,
+          "guard_text": null,
+          "error": null,
+          "statuses": [
+            "ready",
+            "PII Guard reviewing your message",
+            "reading the image with the vision model"
+          ],
+          "question": "What is the total on this receipt?",
+          "ok": true
+        },
+        {
+          "answer": "The receipt is from NANDINI CAFE - MG ROAD.",
+          "total_s": 41.5,
+          "first_token_s": 40.3,
+          "tok_per_sec": 8.7,
+          "prefill_tokens": 686,
+          "tokens": 13,
+          "model": "Qwen3-VL 2B (Q4_K_M)",
+          "blocked": false,
+          "guard_text": null,
+          "error": null,
+          "statuses": [
+            "ready",
+            "PII Guard reviewing your message",
+            "reading the image with the vision model"
+          ],
+          "question": "Which cafe is this receipt from?",
+          "ok": true
+        }
+      ]
+    },
+    {
+      "file": "pii-contacts.txt",
+      "run": 0,
+      "upload_s": 7.5,
+      "verdict": "blocked",
+      "expected": "blocked",
+      "verdict_ok": true,
+      "labels": [
+        "Email address",
+        "Phone number"
+      ],
+      "judged": true,
+      "judge_note": "judge: 0 kept, 2 dropped (not in text / off-policy)",
+      "timings_ms": {
+        "extract": 0,
+        "ocr": 0,
+        "index": 0,
+        "guard": 7471
+      },
+      "chunks": 1,
+      "pages": 0,
+      "ocr_pages": 0,
+      "text_chars": 194,
+      "questions": []
+    },
+    {
+      "file": "pii-secrets.md",
+      "run": 0,
+      "upload_s": 12.6,
+      "verdict": "blocked",
+      "expected": "blocked",
+      "verdict_ok": true,
+      "labels": [
+        "Credential (model judge)",
+        "AWS access key",
+        "AWS secret key",
+        "Password",
+        "API key / secret"
+      ],
+      "judged": true,
+      "judge_note": "judge: 2 kept, 1 dropped (not in text / off-policy)",
+      "timings_ms": {
+        "extract": 1,
+        "ocr": 0,
+        "index": 0,
+        "guard": 12568
+      },
+      "chunks": 1,
+      "pages": 0,
+      "ocr_pages": 0,
+      "text_chars": 285,
+      "questions": []
+    },
+    {
+      "file": "pii-card.pdf",
+      "run": 0,
+      "upload_s": 11.7,
+      "verdict": "blocked",
+      "expected": "blocked",
+      "verdict_ok": true,
+      "labels": [
+        "Credential (model judge)",
+        "Payment card number",
+        "US Social Security number",
+        "Financial account number",
+        "Government ID number"
+      ],
+      "judged": true,
+      "judge_note": "judge: 3 kept, 0 dropped (not in text / off-policy)",
+      "timings_ms": {
+        "extract": 5,
+        "ocr": 0,
+        "index": 0,
+        "guard": 11666
+      },
+      "chunks": 1,
+      "pages": 1,
+      "ocr_pages": 0,
+      "text_chars": 221,
+      "questions": []
+    },
+    {
+      "file": "pii-badge.jpg",
+      "run": 0,
+      "upload_s": 2.5,
+      "verdict": "blocked",
+      "expected": "blocked",
+      "verdict_ok": true,
+      "labels": [
+        "Password",
+        "Email address"
+      ],
+      "judged": true,
+      "judge_note": "judge: 0 kept, 0 dropped (not in text / off-policy)",
+      "timings_ms": {
+        "extract": 482,
+        "ocr": 482,
+        "index": 0,
+        "guard": 1927
+      },
+      "chunks": 1,
+      "pages": 1,
+      "ocr_pages": 1,
+      "text_chars": 86,
+      "questions": []
+    }
+  ],
+  "queries": [
+    {
+      "text": "hi there",
+      "expected_block": false,
+      "blocked": false,
+      "ok": true,
+      "total_s": 2.6
+    },
+    {
+      "text": "What did we decide about the architecture?",
+      "expected_block": false,
+      "blocked": false,
+      "ok": true,
+      "total_s": 5.8
+    },
+    {
+      "text": "my password is Hunter2! can you save it for me",
+      "expected_block": true,
+      "blocked": true,
+      "ok": true,
+      "total_s": 0.0
+    },
+    {
+      "text": "use key AKIAIOSFODNN7EXAMPLE for the bucket",
+      "expected_block": true,
+      "blocked": true,
+      "ok": true,
+      "total_s": 0.0
+    },
+    {
+      "text": "call me on +91 98765 43210 tomorrow",
+      "expected_block": true,
+      "blocked": true,
+      "ok": true,
+      "total_s": 0.0
+    },
+    {
+      "text": "the budget is 250000 INR and the PO is 4500012345",
+      "expected_block": false,
+      "blocked": false,
+      "ok": true,
+      "total_s": 13.8
+    }
+  ]
+}

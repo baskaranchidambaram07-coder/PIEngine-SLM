@@ -5,3 +5,5 @@ numpy
 pypdf
 python-multipart
 requests
+pymupdf
+pillow
