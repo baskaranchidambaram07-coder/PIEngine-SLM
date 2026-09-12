@@ -19,7 +19,8 @@ export const EMBEDDING_DIM = 384;
 export const QUERY_PREFIX =
   'Represent this sentence for searching relevant passages: ';
 
-export const MAX_UPLOAD_BYTES = 2 * 1024 * 1024; // 2 MB inline-KB limit
+// Attachments (per turn: one jpg/jpeg/pdf/txt/md) — limits live in src/attachments.ts.
+export const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 export const MAX_TOOL_ROUNDS = 3;
 
 // Deployment-specific addresses live in config.local.ts, which is gitignored

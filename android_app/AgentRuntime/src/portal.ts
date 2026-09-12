@@ -6,8 +6,9 @@ import ReactNativeBlobUtil from 'react-native-blob-util';
 import { unzip } from 'react-native-zip-archive';
 import {
   AGENTS_DIR, DEFAULT_PORTAL, DISCOVERY_TIMEOUT_MS, DISCOVERY_URLS,
-  ADAPTERS_DIR, EMBEDDER_FILE, EMBEDDER_URL, MODELS_DIR, PORTAL_HEADERS, PORTAL_PROBE_MS,
+  ADAPTERS_DIR, MODELS_DIR, PORTAL_HEADERS, PORTAL_PROBE_MS,
 } from './config';
+import { embedderOf } from './embedder';
 import { log } from './logger';
 
 const PORTAL_KEY = 'portal_url_v1';
@@ -192,7 +193,7 @@ export async function listInstalled(): Promise<InstalledAgent[]> {
         version: manifest.version,
         manifest,
         modelReady: await fs.exists(`${MODELS_DIR}/${manifest.model.file}`),
-        embedderReady: await fs.exists(`${MODELS_DIR}/${EMBEDDER_FILE}`),
+        embedderReady: await fs.exists(`${MODELS_DIR}/${embedderOf(manifest).file}`),
         adapterReady: !manifest.adapter ||
           await fs.exists(`${ADAPTERS_DIR}/${manifest.adapter.file}`),
         versionState: stateFrom(await loadVersionStates(), id, manifest.version),
@@ -267,7 +268,7 @@ const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
 /** Try each source URL in order, with retries per source. The thrown error
  * names the file and every failure reason. */
-async function downloadWithFallback(
+export async function downloadWithFallback(
   urls: string[], dest: string, label: string,
   large: boolean, onProgress?: Progress,
 ) {
@@ -315,12 +316,17 @@ export async function installAgent(entry: StoreEntry, onProgress?: Progress): Pr
       modelDest, `Model ${entry.model.name} (${entry.model.size_gb} GB)`, true, onProgress);
   }
 
-  // 3. embedder (one per device, needed for RAG + inline KB)
-  const embDest = `${MODELS_DIR}/${EMBEDDER_FILE}`;
+  // 3. the embedder THIS agent's KB was built with (named in its manifest;
+  //    bge-small for bundles older than the catalogue). Shared across agents
+  //    that use the same one.
+  const manifest = JSON.parse(await fs.readFile(`${target}/manifest.json`, 'utf8'));
+  const emb = embedderOf(manifest);
+  const embDest = `${MODELS_DIR}/${emb.file}`;
   if (!(await fs.exists(embDest))) {
+    const mb = Math.max(1, Math.round((emb.size_bytes || 36806944) / 1048576));
     await downloadWithFallback(
-      [EMBEDDER_URL, `${base}/models/${EMBEDDER_FILE}`],
-      embDest, 'Embedder (35 MB)', true, onProgress);
+      [emb.download_url, `${base}/models/${encodeURIComponent(emb.file)}`],
+      embDest, `Embedder ${emb.id} (${mb} MB)`, true, onProgress);
   }
   // 4. LoRA adapter, if this agent is fine-tuned. Small, and portal-only:
   // there is no CDN fallback because the adapter exists nowhere else.
@@ -339,6 +345,14 @@ export async function installAgent(entry: StoreEntry, onProgress?: Progress): Pr
             (entry.adapter ? ` (adapter ${entry.adapter.id})` : ''));
 }
 
-export async function uninstallAgent(id: string): Promise<void> {
+/** Remove an installed agent: its bundle, KBs and attachments. The shared
+ *  model file stays (other agents use it). Reports `uninstall` telemetry so
+ *  the Studio's delete guard sees this device release the agent. */
+export async function uninstallAgent(id: string, version?: number, modelId?: string): Promise<void> {
   await fs.unlink(`${AGENTS_DIR}/${id}`).catch(() => {});
+  await log(`uninstalled ${id}${version ? ` v${version}` : ''}`);
+  try {
+    const { reportTelemetry } = require('./appTelemetry');
+    reportTelemetry({ event: 'uninstall', agent_id: id, agent_version: version, model_id: modelId, ok: 1 });
+  } catch {}
 }

@@ -18,8 +18,8 @@ class MainApplication : Application(), ReactApplication {
       object : DefaultReactNativeHost(this) {
         override fun getPackages(): List<ReactPackage> =
             PackageList(this).packages.apply {
-              // Packages that cannot be autolinked yet can be added manually here, for example:
-              // add(MyReactNativePackage())
+              // Own-process logcat reader for the in-app diagnostics log (see LogcatModule).
+              add(LogcatPackage())
             }
 
         override fun getJSMainModuleName(): String = "index"

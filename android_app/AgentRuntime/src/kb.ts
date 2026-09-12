@@ -13,7 +13,7 @@
 // WAL-mode write need not touch the main file's mtime.
 import { open, DB } from '@op-engineering/op-sqlite';
 import ReactNativeBlobUtil from 'react-native-blob-util';
-import { AGENTS_DIR, EMBEDDING_DIM } from './config';
+import { AGENTS_DIR } from './config';
 import { log } from './logger';
 
 export type SearchHit = {
@@ -21,12 +21,12 @@ export type SearchHit = {
   chunk_index: number;
   text: string;
   score: number;
-  source: 'bundle' | 'inline';
+  source: 'bundle' | 'inline' | 'attachment';
 };
 
 type Source = 'bundle' | 'inline';
 type Candidate = { id: number; score: number; source: Source };
-type VecCache = { stamp: string; ids: number[]; mat: Float32Array };
+type VecCache = { stamp: string; ids: number[]; mat: Float32Array; dim: number };
 
 const INLINE_SCHEMA = `CREATE TABLE IF NOT EXISTS chunks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,10 +44,13 @@ function openDb(dir: string, name: string): DB {
   return open({ name, location: dir });
 }
 
+/** Decode a float32 blob at whatever width it has — 384 for bge-small, 768
+ *  for bge-base or nomic, 1024 for bge-large. The KB decides the dimension. */
 function blobToVec(blob: any): Float32Array | null {
   if (blob instanceof ArrayBuffer) return new Float32Array(blob);
   if (blob?.buffer instanceof ArrayBuffer) {
-    return new Float32Array(blob.buffer, blob.byteOffset ?? 0, EMBEDDING_DIM);
+    const bytes = Number(blob.byteLength ?? blob.buffer.byteLength - (blob.byteOffset ?? 0));
+    return new Float32Array(blob.buffer, blob.byteOffset ?? 0, Math.floor(bytes / 4));
   }
   return null;
 }
@@ -82,19 +85,22 @@ async function loadVectors(db: DB, path: string): Promise<VecCache> {
   const t0 = Date.now();
   const res = await db.execute('SELECT id, embedding FROM chunks ORDER BY id');
   const rows = res.rows ?? [];
-  const buf = new Float32Array(rows.length * EMBEDDING_DIM);
+  const first = rows.length ? blobToVec((rows[0] as any).embedding) : null;
+  const dim = first ? first.length : 0;
+  const buf = new Float32Array(rows.length * dim);
   const ids: number[] = [];
   for (const row of rows) {
     const vec = blobToVec((row as any).embedding);
-    if (!vec || vec.length !== EMBEDDING_DIM) continue;
-    buf.set(vec, ids.length * EMBEDDING_DIM);
+    if (!vec || vec.length !== dim) continue;
+    buf.set(vec, ids.length * dim);
     ids.push(Number((row as any).id));
   }
 
   const entry: VecCache = {
     stamp,
     ids,
-    mat: buf.subarray(0, ids.length * EMBEDDING_DIM),
+    mat: buf.subarray(0, ids.length * dim),
+    dim,
   };
   vecCache.set(path, entry);
   while (vecCache.size > CACHE_MAX_FILES) {
@@ -111,10 +117,14 @@ function topCandidates(
   cache: VecCache, query: Float32Array, source: Source, k: number, minScore: number,
 ): Candidate[] {
   const best: Candidate[] = [];
+  const dim = cache.dim;
+  if (dim && dim !== query.length) {
+    throw new Error(`knowledge base vectors are ${dim}-d but the query is ${query.length}-d — the agent's embedder does not match its KB; reinstall the agent`);
+  }
   for (let r = 0; r < cache.ids.length; r++) {
-    const off = r * EMBEDDING_DIM;
+    const off = r * dim;
     let dot = 0;
-    for (let i = 0; i < EMBEDDING_DIM; i++) dot += cache.mat[off + i] * query[i];
+    for (let i = 0; i < dim; i++) dot += cache.mat[off + i] * query[i];
     if (dot < minScore) continue;
     if (best.length < k) {
       best.push({ id: cache.ids[r], score: dot, source });

@@ -33,7 +33,10 @@ function deviceModel(): string {
 }
 
 export type TelemetryEvent = {
-  event: 'install' | 'chat' | 'model_load' | 'error';
+  // 'uninstall' releases the Studio's delete guard for this device — report it
+  // whenever an agent is removed on the handset (the Studio refuses to delete
+  // an agent that a device still holds).
+  event: 'install' | 'uninstall' | 'chat' | 'model_load' | 'error' | 'attachment' | 'guard_block';
   agent_id?: string;
   agent_version?: number;
   model_id?: string;

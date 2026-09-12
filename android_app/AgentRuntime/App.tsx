@@ -2,40 +2,52 @@
  * Offline Enterprise Agent Runtime — Android client.
  * Syncs with the Agent Studio portal, installs agent bundles, and runs them
  * fully on-device: llama.rn inference, SQLite vector KB, on-device tools,
- * and user-uploaded inline KB (≤2 MB per file).
+ * per-turn file attachments (jpg/jpeg/pdf/txt/md ≤ 5 MB, OCR on device,
+ * on-demand retrieval, optional vision model) and the per-agent PII Guard.
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Modal,
-  SafeAreaView, ScrollView, Share, StatusBar, StyleSheet, Text, TextInput,
+  SafeAreaView, ScrollView, Share, StatusBar, StyleSheet, Switch, Text, TextInput,
   TouchableOpacity, View,
 } from 'react-native';
-import { pick } from '@react-native-documents/picker';
-import ReactNativeBlobUtil from 'react-native-blob-util';
 
 import { C } from './src/theme';
-import { DEFAULT_PORTAL, MAX_UPLOAD_BYTES } from './src/config';
+import { DEFAULT_PORTAL } from './src/config';
 import {
   fetchStore, getPortalUrl, installAgent, InstalledAgent, listInstalled,
-  Progress, setPortalUrl, StoreEntry,
+  Progress, setPortalUrl, StoreEntry, uninstallAgent,
 } from './src/portal';
 import { runChat } from './src/chat';
-import { ChatTurn, embedText } from './src/llm';
-import { splitText } from './src/chunker';
-import { addInlineDoc, inlineStats, SearchHit } from './src/kb';
+import { ChatTurn, listBlockedModels, unblockAllModels } from './src/llm';
+import { clearVectorCache, inlineStats, SearchHit } from './src/kb';
 import { clearLogs, getLogs, log } from './src/logger';
 import { reportTelemetry } from './src/appTelemetry';
+import {
+  Attachment, AttachmentError, ingest, pickAttachment, removeAttachment,
+  sweepAttachments, validateMeta,
+} from './src/attachments';
+import { splitText } from './src/chunker';
+import * as guard from './src/guard';
+import { embedderOf } from './src/embedder';
+import {
+  downloadVision, isVisionEnabled, removeVisionFiles, setVisionEnabled,
+  VISION_MODEL, visionFilesReady,
+} from './src/vision';
 
 type Msg = {
   id: string;
-  kind: 'user' | 'bot' | 'tool' | 'status';
+  kind: 'user' | 'bot' | 'tool' | 'status' | 'guard';
   text: string;
   sources?: SearchHit[];
   statsLine?: string;
+  redacted?: string;
+  attachmentName?: string;
 };
 
 let msgSeq = 0;
 const nextId = () => `m${++msgSeq}`;
+const fmtBytes = (b: number) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`);
 
 export default function App() {
   const [screen, setScreen] = useState<'home' | 'chat'>('home');
@@ -53,12 +65,24 @@ export default function App() {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [inline, setInline] = useState({ docs: 0, chunks: 0 });
+  const [attachment, setAttachment] = useState<Attachment | null>(null);
+  const [attStatus, setAttStatus] = useState('');      // non-empty while a file is being processed
+  const attachmentRef = useRef<Attachment | null>(null);
   const historyRef = useRef<ChatTurn[]>([]);
   const listRef = useRef<FlatList<Msg>>(null);
+
+  // vision setting (⚙)
+  const [visionOn, setVisionOn] = useState(false);
+  const [visionReady, setVisionReady] = useState(false);
+  const [visionDl, setVisionDl] = useState('');
+  const [blockedModels, setBlockedModels] = useState<string[]>([]);
 
   const refresh = useCallback(async () => {
     setInstalled(await listInstalled());
     setPortal(await getPortalUrl());
+    setVisionOn(await isVisionEnabled());
+    setVisionReady(await visionFilesReady());
+    setBlockedModels(await listBlockedModels());
     try {
       setStore(await fetchStore());
       setStoreError('');
@@ -69,6 +93,8 @@ export default function App() {
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  const setAtt = (a: Attachment | null) => { attachmentRef.current = a; setAttachment(a); };
 
   // ------------------------------------------------------------- install
 
@@ -92,6 +118,29 @@ export default function App() {
     }
   };
 
+  // ----------------------------------------------------------- uninstall
+
+  const onUninstall = (a: InstalledAgent) => {
+    Alert.alert(
+      `Uninstall ${a.name}?`,
+      'The agent, its knowledge base and any attachments are removed from this device. ' +
+      'The shared model file stays for other agents. You can reinstall it from the store while the Studio still publishes it.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Uninstall', style: 'destructive', onPress: async () => {
+          try {
+            await uninstallAgent(a.id, a.version, a.manifest?.model?.id);
+            clearVectorCache(a.id);
+            if (agent?.id === a.id) { setAgent(null); setScreen('home'); }
+            await refresh();
+          } catch (e: any) {
+            Alert.alert('Uninstall failed', String(e?.message || e).slice(0, 200));
+          }
+        } },
+      ],
+    );
+  };
+
   const openLogs = async () => {
     setLogLines([...(await getLogs())].reverse());
     setShowLogs(true);
@@ -102,11 +151,15 @@ export default function App() {
   const openChat = async (a: InstalledAgent) => {
     setAgent(a);
     historyRef.current = [];
+    if (attachmentRef.current) { removeAttachment(attachmentRef.current).catch(() => {}); setAtt(null); }
+    const pii = guard.piiEnabled(a.manifest);
     setMsgs([{
       id: nextId(), kind: 'status',
-      text: `🔒 ${a.name} v${a.version} — ${a.manifest.model.name}\nKB: ${a.manifest.rag?.chunks ?? 0} chunks · Tools: ${(a.manifest.tools || []).map((t: any) => t.name).join(', ') || 'none'}\nFirst answer loads the model into RAM.`,
+      text: `🔒 ${a.name} v${a.version} — ${a.manifest.model.name}\nKB: ${a.manifest.rag?.chunks ?? 0} chunks · Tools: ${(a.manifest.tools || []).map((t: any) => t.name).join(', ') || 'none'}\nFirst answer loads the model into RAM.` +
+            (pii ? '\n🛡 PII Guard is active.' : ''),
     }]);
     setInline(await inlineStats(a.id));
+    sweepAttachments(a.id).catch(() => {});
     setScreen('chat');
   };
 
@@ -125,80 +178,138 @@ export default function App() {
         text: `${agent.name} v${agent.version} has been ${agent.versionState} by the Studio and can no longer be run. Open the store to install a newer version.` }]);
       return;
     }
+    const att = attachmentRef.current;
+    if (attStatus) { Alert.alert('One moment', 'The attachment is still being processed.'); return; }
+    if (att?.guard?.blocked) { Alert.alert('PII Guard', 'This file was blocked — remove it (✕) to continue.'); return; }
     setInput('');
     setBusy(true);
 
     historyRef.current.push({ role: 'user', content: text });
     const botId = nextId();
     setMsgs(m => [...m,
-      { id: nextId(), kind: 'user', text },
+      { id: nextId(), kind: 'user', text, attachmentName: att?.name },
       { id: botId, kind: 'bot', text: '' },
     ]);
 
     let sources: SearchHit[] = [];
     let statsLine = '';
+    let guarded = false;
+    let redacted = '';
     const answer = await runChat(agent.manifest, agent.id, [...historyRef.current], ev => {
       if (ev.type === 'token') appendBotText(botId, ev.text);
       else if (ev.type === 'sources') sources = ev.items;
       else if (ev.type === 'status') {
-        setMsgs(m => m.map(x => (x.id === botId && !x.text
-          ? { ...x, statsLine: ev.text } : x)));
+        setMsgs(m => m.map(x => (x.id === botId && !x.text ? { ...x, statsLine: ev.text } : x)));
+      } else if (ev.type === 'guard') {
+        guarded = true;
+        setMsgs(m => m.map(x => (x.id === botId ? { ...x, kind: 'guard', text: ev.text, statsLine: '' } : x)));
+      } else if (ev.type === 'redact') {
+        redacted = `🛡 PII Guard masked ${ev.summary.map(s => s.label).join(', ')} in this answer`;
+        setMsgs(m => m.map(x => (x.id === botId ? { ...x, text: ev.text } : x)));
       } else if (ev.type === 'tool') {
         setMsgs(m => [...m, {
           id: nextId(), kind: 'tool',
           text: `⚙ ${ev.name}(${JSON.stringify(ev.args)})\n→ ${JSON.stringify(ev.result).slice(0, 280)}`,
         }]);
       } else if (ev.type === 'stats') {
-        statsLine = `${ev.stats.tokens} tok @ ${ev.stats.tok_per_sec}/s · prompt ${ev.stats.prefill_tokens} tok @ ${ev.stats.prefill_per_sec}/s`;
+        statsLine = `${ev.stats.tokens} tok @ ${ev.stats.tok_per_sec}/s · prompt ${ev.stats.prefill_tokens} tok @ ${ev.stats.prefill_per_sec}/s` +
+                    (ev.model ? ` · ${ev.model}` : '');
       } else if (ev.type === 'error') {
         appendBotText(botId, `\n⚠ ${ev.text}`);
       }
-    });
+    }, att);
 
-    historyRef.current.push({ role: 'assistant', content: answer });
-    setMsgs(m => m.map(x => (x.id === botId ? { ...x, sources, statsLine } : x)));
+    historyRef.current.push({ role: 'assistant', content: guarded ? '[PII Guard refused this request]' : answer });
+    if (!guarded) {
+      setMsgs(m => m.map(x => (x.id === botId ? { ...x, sources, statsLine, redacted } : x)));
+    } else if (att && attachmentRef.current === att) {
+      setAtt({ ...att });     // re-render the chip with the stored verdict
+    }
     setBusy(false);
   };
 
-  // ------------------------------------------------------ inline KB upload
+  // ------------------------------------------------------------ attachment
+  // One file per turn. Validated here (type, size) and again on the copied
+  // bytes; OCR for images and PDFs; the PII Guard's regex stage runs on the
+  // whole text right away when the agent has the guardrail on. The model
+  // judge runs later, inside the turn, on the agent's loaded model.
 
-  const uploadFile = async () => {
-    if (!agent || busy) return;
+  const attachFile = async () => {
+    if (!agent || busy || attStatus) return;
     try {
-      const [res] = await pick({ mode: 'open' });
-      if (!res) return;
-      const name = res.name || 'upload.txt';
-      const size = Number(res.size || 0);
-      if (size > MAX_UPLOAD_BYTES) {
-        Alert.alert('File too large', `Limit is 2 MB — "${name}" is ${(size / 1048576).toFixed(1)} MB.`);
-        return;
+      const file = await pickAttachment();
+      if (!file) return;
+      try { validateMeta(file); } catch (e: any) {
+        if (e instanceof AttachmentError) { Alert.alert('Cannot attach', e.message); return; }
+        throw e;
       }
-      if (!/\.(txt|md|markdown|csv|log)$/i.test(name)) {
-        Alert.alert('Unsupported type', 'Upload .txt, .md, .csv or .log files. (PDFs: add them via the web Studio.)');
-        return;
-      }
-      setBusy(true);
-      setMsgs(m => [...m, { id: nextId(), kind: 'status', text: `📎 Indexing ${name} on-device…` }]);
+      if (attachmentRef.current) { removeAttachment(attachmentRef.current).catch(() => {}); setAtt(null); }
+      setAttStatus(`Reading ${file.name}…`);
+      const att = await ingest(agent.id, file, s => setAttStatus(s), embedderOf(agent.manifest));
 
-      const path = res.uri.startsWith('content://') ? res.uri : res.uri.replace('file://', '');
-      const content = await ReactNativeBlobUtil.fs.readFile(path, 'utf8');
-      const chunks = splitText(String(content));
-      if (!chunks.length) throw new Error('no extractable text');
-      const embeddings: Float32Array[] = [];
-      for (const chnk of chunks) embeddings.push(await embedText(chnk, false));
-      await addInlineDoc(agent.id, name, chunks, embeddings);
-      const st2 = await inlineStats(agent.id);
-      setInline(st2);
-      setMsgs(m => [...m, {
-        id: nextId(), kind: 'status',
-        text: `✅ ${name}: ${chunks.length} chunks added to inline KB (now ${st2.docs} docs / ${st2.chunks} chunks on top of the bundle KB). Ask away.`,
-      }]);
+      att.guardEnabled = guard.piiEnabled(agent.manifest);
+      if (att.guardEnabled && att.text) {
+        setAttStatus('PII Guard scanning…');
+        const chunks = splitText(att.text);
+        att.guard = await guard.inspectChunks(chunks.length ? chunks : [att.text], `attachment:${att.name}`, null, 0);
+        if (att.guard.blocked) {
+          reportTelemetry({ event: 'guard_block', agent_id: agent.id, agent_version: agent.version,
+                            detail: `attachment: ${att.guard.summary.map(s => s.label).join(', ')}`.slice(0, 250), ok: 1 });
+          setMsgs(m => [...m, { id: nextId(), kind: 'guard',
+            text: guard.refusalMessage(`the attached document "${att.name}"`, att.guard!.summary) }]);
+        }
+      }
+      reportTelemetry({ event: 'attachment', agent_id: agent.id, kb_hits: att.chunks, ok: 1,
+                        detail: `${att.kind} ${att.status} pages=${att.pages} ocr=${att.ocrPages} guard=${att.guard?.blocked ? 'blocked' : att.guardEnabled ? 'clear' : 'off'}` });
+      setAtt(att);
+      if (att.status === 'no-text') {
+        Alert.alert('No text found', att.kind === 'image'
+          ? 'OCR found no text in this image. With the vision model enabled (⚙) the agent can still look at it.'
+          : 'No readable text could be extracted from this file.');
+      }
     } catch (e: any) {
       const s = String(e?.message || e);
-      if (!/cancel/i.test(s)) Alert.alert('Upload failed', s.slice(0, 200));
+      if (!/cancel/i.test(s)) {
+        log(`attach: FAILED ${s.slice(0, 200)}`);
+        Alert.alert('Attachment failed', s.slice(0, 240));
+      }
     } finally {
-      setBusy(false);
+      setAttStatus('');
     }
+  };
+
+  const dropAttachment = () => {
+    const att = attachmentRef.current;
+    if (att) removeAttachment(att).catch(() => {});
+    setAtt(null);
+  };
+
+  // --------------------------------------------------------------- vision
+
+  const toggleVision = async (on: boolean) => {
+    if (on && !visionReady) {
+      Alert.alert(
+        'Download the vision model?',
+        `${VISION_MODEL.name} + projector, about ${VISION_MODEL.size_gb} GB, from the portal (Hugging Face fallback). ` +
+        `Needs a phone with ${VISION_MODEL.min_device_ram_gb} GB RAM or more; on smaller devices keep this off — images are still read with on-device OCR.`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Download', onPress: async () => {
+            try {
+              await downloadVision((label, done, total) =>
+                setVisionDl(`${label}${total > 0 ? ` ${Math.round((100 * done) / total)}%` : ''}`));
+              await setVisionEnabled(true);
+              setVisionOn(true); setVisionReady(true); setVisionDl('');
+            } catch (e: any) {
+              setVisionDl('');
+              Alert.alert('Download failed', String(e?.message || e).slice(0, 240));
+            }
+          } },
+        ]);
+      return;
+    }
+    await setVisionEnabled(on);
+    setVisionOn(on);
   };
 
   // ------------------------------------------------------------ rendering
@@ -210,9 +321,13 @@ export default function App() {
     if (item.kind === 'tool') {
       return <View style={[st.bubble, st.toolBubble]}><Text style={st.toolText}>{item.text}</Text></View>;
     }
+    if (item.kind === 'guard') {
+      return <View style={[st.bubble, st.guardBubble]}><Text style={st.guardText}>{item.text}</Text></View>;
+    }
     const user = item.kind === 'user';
     return (
       <View style={[st.bubble, user ? st.userBubble : st.botBubble]}>
+        {user && !!item.attachmentName && <Text style={st.attTag}>📎 {item.attachmentName}</Text>}
         {item.text ? <Text style={st.msgText}>{item.text}</Text>
           : (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
@@ -223,18 +338,54 @@ export default function App() {
         {!user && item.sources && item.sources.length > 0 && (
           <View style={st.srcRow}>
             {item.sources.map((s2, i) => (
-              <Text key={i} style={st.srcChip}>
-                📄 {s2.doc_name} #{s2.chunk_index} · {s2.score}{s2.source === 'inline' ? ' · 📎' : ''}
+              <Text key={i} style={[st.srcChip, s2.source === 'attachment' && st.srcChipAtt]}>
+                {s2.source === 'attachment' ? '📎' : '📄'} {s2.doc_name} #{s2.chunk_index} · {s2.score}{s2.source === 'inline' ? ' · 📎' : ''}
               </Text>
             ))}
           </View>
         )}
+        {!user && !!item.redacted && <Text style={[st.stats, { color: C.warn }]}>{item.redacted}</Text>}
         {!user && !!item.text && !!item.statsLine && <Text style={st.stats}>{item.statsLine}</Text>}
       </View>
     );
   };
 
+  const renderAttachChip = () => {
+    if (!attachment && !attStatus) return null;
+    const a = attachment;
+    const blocked = !!a?.guard?.blocked;
+    let meta = '';
+    if (attStatus) meta = attStatus;
+    else if (a) {
+      const parts = [fmtBytes(a.bytes)];
+      if (a.pages > 1) parts.push(`${a.pages} pages`);
+      if (a.ocrPages) parts.push(`OCR ×${a.ocrPages}`);
+      parts.push(a.status === 'no-text' ? 'no text' : `${a.chunks} chunk${a.chunks === 1 ? '' : 's'}${a.small ? ' (whole file used)' : ''}`);
+      parts.push(!a.guardEnabled ? '🛡 PII Guard: off for this agent' : blocked ? '🛡 PII Guard: blocked' : '🛡 PII Guard: clear');
+      meta = parts.join(' · ');
+    }
+    const icon = a?.kind === 'image' ? '🖼️' : a?.kind === 'pdf' ? '📄' : '📝';
+    return (
+      <View style={[st.chip, blocked && st.chipBlocked, !!a && !blocked && !attStatus && st.chipClear]}>
+        <Text style={{ fontSize: 18 }}>{attStatus && !a ? '📎' : icon}</Text>
+        <View style={{ flex: 1, marginHorizontal: 8 }}>
+          <Text style={st.chipName} numberOfLines={1}>{a?.name || 'Attachment'}</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            {!!attStatus && <ActivityIndicator size="small" color={C.accent} />}
+            <Text style={st.chipMeta} numberOfLines={2}>{meta}</Text>
+          </View>
+        </View>
+        {!attStatus && (
+          <TouchableOpacity onPress={dropAttachment} disabled={busy} hitSlop={8}>
+            <Text style={st.chipX}>✕</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+    );
+  };
+
   if (screen === 'chat' && agent) {
+    const pii = guard.piiEnabled(agent.manifest);
     return (
       <SafeAreaView style={st.root}>
         <StatusBar barStyle="light-content" backgroundColor={C.panel} />
@@ -244,11 +395,12 @@ export default function App() {
             <Text style={st.hTitle} numberOfLines={1}>{agent.name}</Text>
             <Text style={st.hSub} numberOfLines={1}>
               ● on-device · {agent.manifest.model.name}
+              {pii ? ' · 🛡 PII Guard active' : ''}
               {inline.chunks ? ` · 📎 ${inline.chunks} inline chunks` : ''}
             </Text>
           </View>
-          <TouchableOpacity onPress={uploadFile} disabled={busy}>
-            <Text style={st.clip}>📎</Text>
+          <TouchableOpacity onPress={attachFile} disabled={busy || !!attStatus}>
+            <Text style={[st.clip, (busy || !!attStatus) && { opacity: 0.4 }]}>📎</Text>
           </TouchableOpacity>
         </View>
         <FlatList
@@ -260,12 +412,13 @@ export default function App() {
           onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
         />
         <KeyboardAvoidingView behavior={undefined}>
+          {renderAttachChip()}
           <View style={st.composer}>
             <TextInput
               style={st.input}
               value={input}
               onChangeText={setInput}
-              placeholder="Ask your agent…"
+              placeholder={attachment ? 'Ask about the attached file…' : 'Ask your agent…'}
               placeholderTextColor={C.muted}
               editable={!busy}
               onSubmitEditing={send}
@@ -305,10 +458,16 @@ export default function App() {
             <Text style={st.cardTitle}>{a.name} <Text style={st.mutedSm}>v{a.version}</Text></Text>
             <Text style={st.mutedSm}>
               {a.manifest.model.name} · {a.manifest.rag?.chunks ?? 0} KB chunks · {(a.manifest.tools || []).length} tools
+              {guard.piiEnabled(a.manifest) ? ' · 🛡 PII Guard' : ''}
             </Text>
-            <Text style={a.modelReady ? st.ready : st.warn}>
-              {a.modelReady ? '✓ offline-ready — tap to chat' : '⚠ model files missing'}
-            </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+              <Text style={a.modelReady ? st.ready : st.warn}>
+                {a.modelReady ? '✓ offline-ready — tap to chat' : '⚠ model files missing'}
+              </Text>
+              <TouchableOpacity onPress={() => onUninstall(a)} hitSlop={8}>
+                <Text style={st.uninstall}>Uninstall</Text>
+              </TouchableOpacity>
+            </View>
           </TouchableOpacity>
         ))}
 
@@ -420,6 +579,44 @@ export default function App() {
                 <Text style={{ color: C.text, textAlign: 'center' }}>Cancel</Text>
               </TouchableOpacity>
             </View>
+
+            <View style={st.divider} />
+            <Text style={[st.cardTitle, { fontSize: 15 }]}>🖼️ Vision model for attached images</Text>
+            <View style={st.switchRow}>
+              <Text style={[st.mutedSm, { flex: 1, fontSize: 12.5, lineHeight: 18 }]}>
+                {visionReady
+                  ? `${VISION_MODEL.name} is on this device (${VISION_MODEL.size_gb} GB). ${visionOn ? 'Attached images are read by the vision model and by OCR.' : 'Off — images are read with OCR only.'}`
+                  : `Not downloaded. Off — attached images are read with on-device OCR only. Needs ~${VISION_MODEL.size_gb} GB and a ${VISION_MODEL.min_device_ram_gb} GB+ phone.`}
+              </Text>
+              <Switch value={visionOn} onValueChange={toggleVision} disabled={!!visionDl}
+                      trackColor={{ true: C.accent, false: C.border }} />
+            </View>
+            {!!visionDl && <Text style={st.warn}>{visionDl}</Text>}
+            {visionReady && (
+              <TouchableOpacity onPress={async () => {
+                await setVisionEnabled(false); await removeVisionFiles();
+                setVisionOn(false); setVisionReady(false);
+              }}>
+                <Text style={[st.uninstall, { marginTop: 8 }]}>Remove vision model files</Text>
+              </TouchableOpacity>
+            )}
+
+            <View style={st.divider} />
+            <Text style={[st.cardTitle, { fontSize: 15 }]}>🧠 Blocked models</Text>
+            <Text style={[st.mutedSm, { fontSize: 12.5, lineHeight: 18 }]}>
+              {blockedModels.length
+                ? `A model is blocked after one failed load so the app cannot crash in a loop. Blocked here: ${blockedModels.join(', ')}. Retry gives each one a fresh attempt — close other apps first.`
+                : 'None. A model is blocked here only after it fails to load on this phone.'}
+            </Text>
+            {blockedModels.length > 0 && (
+              <TouchableOpacity style={[st.installBtn, { marginTop: 10 }]} onPress={async () => {
+                const n = await unblockAllModels();
+                setBlockedModels([]);
+                Alert.alert('Unblocked', `${n} model${n === 1 ? '' : 's'} will be tried again on the next chat.`);
+              }}>
+                <Text style={{ color: '#fff', fontWeight: '600', fontSize: 13 }}>Retry blocked models</Text>
+              </TouchableOpacity>
+            )}
           </View>
         </View>
       </Modal>
@@ -448,6 +645,7 @@ const st = StyleSheet.create({
   mutedSm: { color: C.muted, fontSize: 11.5, marginBottom: 3 },
   ready: { color: C.green, fontSize: 12, marginTop: 5 },
   warn: { color: C.warn, fontSize: 12, marginTop: 5 },
+  uninstall: { color: C.danger, fontSize: 12, marginTop: 5, paddingHorizontal: 4 },
   warnBox: {
     color: '#d8c9a3', fontSize: 12, backgroundColor: '#1a1712',
     borderLeftWidth: 3, borderLeftColor: C.warn, padding: 9, borderRadius: 6, marginBottom: 10,
@@ -461,6 +659,9 @@ const st = StyleSheet.create({
   botBubble: { alignSelf: 'flex-start', backgroundColor: C.panel2, borderColor: C.border },
   toolBubble: { alignSelf: 'flex-start', backgroundColor: C.toolBg, borderColor: C.toolBorder, maxWidth: '92%' },
   toolText: { color: C.toolText, fontSize: 11.5, fontFamily: 'monospace' },
+  guardBubble: { alignSelf: 'flex-start', backgroundColor: '#1f1a0e', borderColor: '#6b5418', maxWidth: '92%' },
+  guardText: { color: '#e8c76a', fontSize: 13, lineHeight: 19 },
+  attTag: { color: '#cfe0ff', fontSize: 11.5, marginBottom: 4 },
   msgText: { color: C.text, fontSize: 13.5, lineHeight: 19 },
   statusMsg: { color: C.muted, fontSize: 12, textAlign: 'center', paddingVertical: 6, lineHeight: 17 },
   srcRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 8, paddingTop: 6, borderTopWidth: 1, borderTopColor: C.border },
@@ -468,7 +669,17 @@ const st = StyleSheet.create({
     color: C.muted, fontSize: 10, backgroundColor: '#10151c', borderWidth: 1,
     borderColor: C.border, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 1,
   },
+  srcChipAtt: { color: C.green, borderColor: C.toolBorder, backgroundColor: C.toolBg },
   stats: { color: C.muted, fontSize: 10, marginTop: 6 },
+  chip: {
+    flexDirection: 'row', alignItems: 'center', marginHorizontal: 10, marginTop: 8,
+    padding: 9, borderRadius: 10, borderWidth: 1, borderColor: C.userBorder, backgroundColor: C.userBubble,
+  },
+  chipBlocked: { borderColor: '#7a2e2e', backgroundColor: '#2a1414' },
+  chipClear: { borderColor: C.toolBorder, backgroundColor: C.toolBg },
+  chipName: { color: C.text, fontSize: 12.5, fontWeight: '600' },
+  chipMeta: { color: C.muted, fontSize: 11, flex: 1 },
+  chipX: { color: C.muted, fontSize: 15, fontWeight: '700', paddingHorizontal: 4 },
   composer: {
     flexDirection: 'row', gap: 8, padding: 10, backgroundColor: C.panel,
     borderTopWidth: 1, borderTopColor: C.border,
@@ -487,6 +698,8 @@ const st = StyleSheet.create({
     color: C.text, paddingHorizontal: 12, paddingVertical: 10, fontSize: 15,
     minHeight: 76, textAlignVertical: 'top', marginTop: 12, fontFamily: 'monospace',
   },
+  divider: { height: 1, backgroundColor: C.border, marginVertical: 16 },
+  switchRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 6 },
   modalWrap: { flex: 1, backgroundColor: '#000a', alignItems: 'center', justifyContent: 'center', padding: 24 },
   modal: {
     backgroundColor: C.panel, borderColor: C.border, borderWidth: 1,
