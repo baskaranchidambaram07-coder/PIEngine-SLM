@@ -160,8 +160,10 @@ async function render() {
           <h3>${esc(a.name)}</h3><p>${esc(a.description) || 'No description'}</p>
           <div class="meta">
             <span class="chip blue">${esc(a.model_id)}</span>
+            ${a.embedder_id && a.embedder_id !== 'bge-small-en-v1.5' ? `<span class="chip" title="embedding model">⌁ ${esc(a.embedder_id)}</span>` : ''}
             <span class="chip">${a.kb.docs} docs · ${a.kb.chunks} chunks</span>
             <span class="chip">${a.tools} tools</span>
+            ${(a.guardrails && a.guardrails.pii) ? '<span class="chip green">🛡 PII Guard</span>' : ''}
             ${a.version ? `<span class="chip green">published v${a.version}</span>` : '<span class="chip">draft</span>'}
           </div>
         </div>`).join('')}</div>`
@@ -180,8 +182,9 @@ async function render() {
       </table></div>` : `<div class="empty">Nothing published yet.</div>`}`;
   }
   if (state.view === 'models') {
-    const [cat, disk, hidden] = await Promise.all([
-      api('/api/catalog'), api('/api/catalog/disk'), api('/api/catalog/hidden')]);
+    const [cat, disk, hidden, embs] = await Promise.all([
+      api('/api/catalog'), api('/api/catalog/disk'), api('/api/catalog/hidden'), api('/api/embedders')]);
+    state.embedders = embs;
     const onServer = cat.filter(c => c.downloaded);
     const reclaimable = onServer.filter(c => c.can_delete_file && !c.usage.in_use);
     m.innerHTML = `<div class="row"><div class="grow"><h1>Model Catalog</h1>
@@ -216,6 +219,25 @@ async function render() {
           <button class="danger-ghost small" onclick="removeFromCatalog('${c.id}')">Remove</button>
         </td></tr>`).join('')}
       </table></div>
+      <div class="panel"><h3>Embedding models</h3>
+        <div class="info" style="margin-bottom:10px">
+          How a knowledge base is turned into vectors. Each entry exists twice — as an ONNX model
+          the Studio embeds with, and as a GGUF the handset embeds queries with — and the two are
+          verified to produce the same vectors. Pick one per agent under <b>Embedding model</b>.
+        </div>
+        <table><tr><th>Model</th><th>Vector</th><th>Languages</th><th>Server</th><th>Portal (phone file)</th><th>Used by</th><th style="text-align:right">Actions</th></tr>
+        ${embs.map(e => `<tr>
+          <td><b>${esc(e.name)}</b> ${e.default ? '<span class="chip blue">default</span>' : ''}
+            <br><span style="color:var(--muted);font-size:11.5px">${esc(e.notes)}</span></td>
+          <td>${e.dim}-d · ${esc(e.pooling)} · ${e.max_tokens} tok</td>
+          <td style="font-size:12px">${esc(e.languages)}</td>
+          <td>${e.server_cached ? '<span class="chip green">ready</span>' : '<span class="chip">on demand</span>'}<br><span style="color:var(--muted);font-size:11px">${e.server_size_mb} MB ONNX</span></td>
+          <td>${e.device_cached ? '<span class="chip green">cached</span>' : '<span class="chip">Hugging Face</span>'}<br><span style="color:var(--muted);font-size:11px">${(e.size_bytes/1048576).toFixed(0)} MB GGUF</span></td>
+          <td style="font-size:12px">${e.used_by.length ? e.used_by.map(esc).join(', ') : '<span style="color:var(--muted)">—</span>'}</td>
+          <td style="text-align:right;white-space:nowrap">
+            ${(!e.server_cached || !e.device_cached) ? `<button class="ghost small" onclick="cacheEmbedder('${e.id}')">Cache here</button>` : '<span style="color:var(--muted);font-size:11px">complete</span>'}
+          </td></tr>`).join('')}
+        </table></div>
       ${hidden.length ? `<div class="panel"><h3>Hidden from the catalogue (${hidden.length})</h3>
         <table><tr><th>Model</th><th>Size</th><th>Still used by</th><th style="text-align:right"></th></tr>
         ${hidden.map(h => `<tr>
@@ -322,16 +344,26 @@ async function renderGovernance(m){
     </div>
 
     <div class="panel"><h3>Event log <span style="font-weight:400;color:var(--muted);font-size:12px">— live from Journey 2 &amp; devices</span></h3>
-      <div class="row" style="margin-bottom:10px;flex-wrap:wrap;gap:6px">
-        ${['','chat','install','model_load','error','model_download','bundle_download','apk_download'].map(f=>
-          `<button class="ghost small ${govFilter===f?'':''}" style="${govFilter===f?'border-color:var(--accent);color:var(--accent)':''}" onclick="govFilter='${f}';renderGovLog()">${f||'all'}</button>`).join('')}
-      </div>
+      <div id="gov-filters" class="row" style="margin-bottom:10px;flex-wrap:wrap;gap:6px"></div>
       <div id="gov-log"></div>
     </div>`;
   renderGovLog();
 }
 
+const GOV_EVENTS = ['', 'chat', 'install', 'uninstall', 'model_load', 'attachment', 'guard_block', 'error',
+                    'model_download', 'bundle_download', 'apk_download', 'forced_delete'];
+
+// Filter buttons are re-rendered together with the log so the active one is
+// highlighted — previously only the log body refreshed and the highlight
+// never moved.
+function renderGovFilters(){
+  const bar = document.getElementById('gov-filters');
+  if(!bar) return;
+  bar.innerHTML = GOV_EVENTS.map(f => `<button class="${govFilter===f ? 'small' : 'ghost small'}" onclick="govFilter='${f}';renderGovLog()">${f || 'all'}</button>`).join('');
+}
+
 async function renderGovLog(){
+  renderGovFilters();
   const el = document.getElementById('gov-log');
   if(!el) return;
   el.innerHTML = '<div class="empty"><span class="spinner"></span></div>';
@@ -364,6 +396,7 @@ async function newAgent() {
 async function openAgent(id) {
   state.agent = await api('/api/agents/' + id);
   state.catalog = await api('/api/catalog');
+  try { state.embedders = await api('/api/embedders'); } catch (e) { state.embedders = state.embedders || []; }
   // tolerate an older Studio build with no adapter registry rather than
   // blanking the whole editor
   state.adapters = await api('/api/adapters').catch(() => []);
@@ -379,14 +412,15 @@ async function renderEditor() {
   m.innerHTML = `
     <span class="back" onclick="state.agent=null;render()">← All agents</span>
     <div class="row"><div class="grow"><h1>${esc(a.name)}</h1>
-      <div class="sub">${a.version ? 'Published v' + a.version : 'Draft'} · <code>${a.id}</code></div></div>
-      <button class="danger-ghost small" onclick="deleteAgent()">Delete agent</button>
+      <div class="sub">${a.version ? 'Published v' + a.version : 'Draft'} · <code>${a.id}</code><span id="installs-line"></span></div></div>
+      <button class="danger-ghost small" id="delete-btn" onclick="deleteAgent()" disabled title="checking where this agent is installed…">Delete agent</button>
     </div>
     <div class="tabs">
       ${['details','knowledge','tools','publish'].map(t =>
         `<div class="tab ${state.tab===t?'active':''}" onclick="setTab('${t}')">${{details:'Details & Model',knowledge:'Knowledge Base',tools:'Tools',publish:'Publish'}[t]}</div>`).join('')}
     </div>
     <div id="tabbody"></div>`;
+  loadInstalls(a.id);
   const body = $('tabbody');
   if (state.tab === 'details') renderDetails(body);
   if (state.tab === 'knowledge') await renderKnowledge(body);
@@ -415,6 +449,14 @@ function renderDetails(body) {
           <span class="chip">${c.size_gb} GB</span><span class="chip">min ${c.min_device_ram_gb} GB RAM</span></div>
           <div class="info">${esc(c.notes)} · ${esc(c.license)}</div>
         </div>`).join('')}
+    </div>
+    <div class="panel"><h3>Guardrails</h3>
+      <label class="check" style="display:flex;align-items:center;gap:10px;margin:0;font-weight:500;color:var(--text);font-size:13px;cursor:pointer">
+        <input id="f-guard-pii" type="checkbox" style="width:16px;height:16px;accent-color:var(--accent)"
+               ${(a.guardrails && a.guardrails.pii) ? 'checked' : ''}
+               onchange="toggleGuardrail('pii', this.checked)">
+        <span><b>🛡 PII Guard</b></span>
+      </label>
     </div>
     <div class="panel"><h3>Scenario tuning (LoRA adapter)</h3>
       <div class="info" style="margin-bottom:10px">
@@ -481,6 +523,8 @@ async function saveDetails() {
     adapter_id: a.adapter_id || '',
     generation: { temperature:+$('f-temp').value, top_p:+$('f-topp').value, max_tokens:+$('f-maxtok').value },
     rag: { top_k:+$('f-topk').value, min_score:+$('f-minscore').value },
+    guardrails: { ...(a.guardrails||{}), pii: $('f-guard-pii').checked },
+    embedder_id: a.embedder_id || 'bge-small-en-v1.5',
     tools: a.tools || [],
   };
   state.agent = await api('/api/agents/' + a.id, { method:'PUT', json:payload });
@@ -488,12 +532,42 @@ async function saveDetails() {
   renderEditor();
 }
 
+
+// The embedder belongs with the knowledge base it shapes, so its panel lives
+// on the Knowledge Base tab (people looked for it there, not under Model).
+function embedderPanel(a) {
+  const cur = a.embedder_id || 'bge-small-en-v1.5';
+  const embs = state.embedders || [];
+  const e = embs.find(x => x.id === cur);
+  return `
+    <div class="panel"><h3>Embedding model</h3>
+      <div class="info" style="margin-bottom:10px">
+        Turns the knowledge base into vectors here and the user's questions into vectors on the
+        device — the same model in both places. Changing it re-embeds every document already
+        uploaded (${a.kb ? a.kb.chunks : 0} chunks) and needs a new publish.
+      </div>
+      <div class="row" style="gap:12px;align-items:flex-start">
+        <select id="f-embedder" onchange="setEmbedder(this.value)" style="width:auto;min-width:320px;flex:0 0 auto">
+          ${embs.map(x => `<option value="${x.id}" ${x.id === cur ? 'selected' : ''}>${esc(x.name)}${x.default ? ' — default' : ''}</option>`).join('')}
+          ${embs.length ? '' : `<option value="${esc(cur)}" selected>${esc(cur)}</option>`}
+        </select>
+        <div class="info" style="flex:1;margin:0">
+          ${e ? `${e.dim}-dim · ${esc(e.pooling)} pooling · ${e.max_tokens} tokens · ${esc(e.languages)} · ${(e.size_bytes/1048576).toFixed(0)} MB on the phone
+                ${e.server_cached ? '<span class="chip green" style="margin-left:6px">on server</span>' : '<span class="chip" style="margin-left:6px">downloads on first use</span>'}
+                <br>${esc(e.notes)}` : 'Embedding catalogue unavailable.'}
+        </div>
+      </div>
+    </div>`;
+}
+
 async function renderKnowledge(body) {
   const docs = await api(`/api/agents/${state.agent.id}/docs`);
+  const emb = (state.embedders||[]).find(e => e.id === (state.agent.embedder_id||'bge-small-en-v1.5'));
   body.innerHTML = `
+    ${embedderPanel(state.agent)}
     <div class="panel"><h3>Documents</h3>
       <div class="drop" id="drop" onclick="$('file-in').click()">Drop files here or click to upload<br>
-        <span style="font-size:11.5px">.txt · .md · .pdf — chunked (~300 tokens) and embedded with bge-small-en-v1.5 (384-dim, phone-friendly)</span></div>
+        <span style="font-size:11.5px">.txt · .md · .pdf — chunked (~300 tokens) and embedded with ${esc(emb ? emb.name : (state.agent.embedder_id||'bge-small-en-v1.5'))}${emb ? ` (${emb.dim}-dim)` : ''}</span></div>
       <input type="file" id="file-in" multiple accept=".txt,.md,.pdf,.csv" style="display:none" onchange="uploadFiles(this.files)">
       <div id="upload-status" style="margin-top:10px"></div>
       ${docs.length ? `<table style="margin-top:14px"><tr><th>Document</th><th>Chunks</th><th>Added</th><th></th></tr>
@@ -562,12 +636,63 @@ function renderTools(body) {
     </div>`;
 }
 
+// A guardrail is saved the moment it is toggled — like tools, and unlike the
+// text fields. Publish reads the SAVED config, so a tick that only lived in
+// the browser until "Save" was silently lost when the author went straight
+// to Publish. That happened on the first day; hence this.
+async function toggleGuardrail(name, on) {
+  const a = state.agent;
+  a.guardrails = { ...(a.guardrails||{}), [name]: !!on };
+  try {
+    state.agent = await api('/api/agents/' + a.id, { method:'PUT', json:{
+      name:a.name, description:a.description, scenario:a.scenario, system_prompt:a.system_prompt,
+      model_id:a.model_id, adapter_id:a.adapter_id||'', generation:a.generation,
+      rag:a.rag, guardrails:a.guardrails, embedder_id:a.embedder_id||'bge-small-en-v1.5', tools:a.tools||[] }});
+    toast(on ? '🛡 PII Guard saved as ON — publish a new version to ship it to devices'
+             : 'PII Guard saved as OFF — publish a new version to ship it');
+  } catch (e) { toast('Could not save guardrail: ' + e.message, true); }
+}
+
 async function persistTools() {
   const a = state.agent;
   state.agent = await api('/api/agents/' + a.id, { method:'PUT', json:{
     name:a.name, description:a.description, scenario:a.scenario, system_prompt:a.system_prompt,
     model_id:a.model_id, adapter_id:a.adapter_id||'', generation:a.generation,
-    rag:a.rag, tools:a.tools }});
+    rag:a.rag, guardrails:a.guardrails||{pii:false}, embedder_id:a.embedder_id||'bge-small-en-v1.5', tools:a.tools }});
+}
+
+// Embedder choice persists immediately (like guardrails and tools): the server
+// re-embeds the KB on change, which is the expensive, visible part.
+async function setEmbedder(id) {
+  const a = state.agent;
+  if ((a.embedder_id || 'bge-small-en-v1.5') === id) return;
+  const chunks = a.kb ? a.kb.chunks : 0;
+  if (chunks && !confirm(`Switch the embedding model and re-embed ${chunks} chunk${chunks === 1 ? '' : 's'} now?\n\nDevices need a new publish to pick it up; the bundle will also tell them which embedder file to download.`)) { renderEditor(); return; }
+  a.embedder_id = id;
+  toast(chunks ? `Re-embedding ${chunks} chunks…` : 'Embedding model saved');
+  try {
+    state.agent = await api('/api/agents/' + a.id, { method:'PUT', json:{
+      name:a.name, description:a.description, scenario:a.scenario, system_prompt:a.system_prompt,
+      model_id:a.model_id, adapter_id:a.adapter_id||'', generation:a.generation,
+      rag:a.rag, guardrails:a.guardrails||{pii:false}, embedder_id:id, tools:a.tools||[] }});
+    toast(chunks ? `Knowledge base re-embedded with ${id} — publish a new version to ship it` : `Embedding model set to ${id}`);
+  } catch (e) { toast('Could not change the embedder: ' + e.message, true); }
+  renderEditor();
+}
+
+async function cacheEmbedder(id) {
+  try {
+    await api(`/api/embedders/${id}/download`, { method:'POST' });
+    toast('Downloading the embedding model (server ONNX + phone GGUF)…');
+    const poll = async () => {
+      const d = await api('/api/embedders/downloads');
+      const st = d[id];
+      if (!st || st.state === 'running') return setTimeout(poll, 3000);
+      if (st.state === 'error') return toast('Embedder download failed: ' + st.error, true);
+      toast(`${id} cached on server and portal`); render();
+    };
+    setTimeout(poll, 3000);
+  } catch (e) { toast('Could not start the download: ' + e.message, true); }
 }
 
 async function addToolTemplate(i) {
@@ -600,13 +725,14 @@ async function renderPublish(body) {
     <div class="panel"><h3>Bundle preview — what the device downloads</h3>
       <table>
         <tr><td style="width:220px;color:var(--muted)">Agent</td><td><b>${esc(a.name)}</b> — next version v${a.version+1}</td></tr>
-        <tr><td style="color:var(--muted)">manifest.json</td><td>persona, system prompt, generation params, RAG config, ${(a.tools||[]).length} tool definition(s)</td></tr>
+        <tr><td style="color:var(--muted)">manifest.json</td><td>persona, system prompt, generation params, RAG config, guardrails, ${(a.tools||[]).length} tool definition(s)</td></tr>
+        <tr><td style="color:var(--muted)">Guardrails</td><td>${(a.guardrails && a.guardrails.pii) ? '🛡 PII Guard <b>on</b> — messages, files and answers are screened on the device' : 'none — PII Guard off (enable it in the Guardrails panel)'}</td></tr>
         <tr><td style="color:var(--muted)">kb.sqlite</td><td>${a.kb ? `${a.kb.docs} docs / ${a.kb.chunks} chunks with 384-dim embeddings` : 'empty'}</td></tr>
         <tr><td style="color:var(--muted)">Model (cached separately)</td><td>${esc(model.name||a.model_id)} — ${model.size_gb} GB GGUF, downloaded once per device, shared across agents</td></tr>
         <tr><td style="color:var(--muted)">Scenario tuning</td><td>${a.adapter_id
           ? esc(a.adapter_id) + ' — LoRA adapter, downloaded once and applied on top of the shared base model'
           : 'none (stock weights)'}</td></tr>
-        <tr><td style="color:var(--muted)">Embedder</td><td>bge-small-en-v1.5 ONNX (~130 MB) — shared across agents</td></tr>
+        <tr><td style="color:var(--muted)">Embedder</td><td>${(() => { const e = (state.embedders||[]).find(x => x.id === (a.embedder_id||'bge-small-en-v1.5')); return e ? `${esc(e.name)} — ${e.dim}-d; the device downloads <code>${esc(e.file)}</code> (${(e.size_bytes/1048576).toFixed(0)} MB) once and shares it across agents using it` : esc(a.embedder_id||'bge-small-en-v1.5'); })()}</td></tr>
       </table>
       <div style="margin-top:16px" class="row">
         <button class="green" onclick="publishAgent()">Publish v${a.version+1}</button>
@@ -664,11 +790,46 @@ async function deleteVersion(version) {
   } catch (e) { toast('Delete failed: ' + e.message, true); }
 }
 
+// Delete is allowed only when no device holds the agent. The web runtime is
+// read from disk on the server; handsets are known from their telemetry.
+async function loadInstalls(id) {
+  let h;
+  try { h = await api(`/api/agents/${id}/installs`); } catch (e) { return; }
+  if (!state.agent || state.agent.id !== id) return;
+  state.installs = h;
+  const line = $('installs-line'), btn = $('delete-btn');
+  if (!line || !btn) return;
+  const bits = [];
+  if (h.web.length) bits.push(`web runtime v${h.web[0].version ?? '?'}`);
+  if (h.android.length) bits.push(`${h.android.length} Android device${h.android.length === 1 ? '' : 's'}`);
+  line.innerHTML = bits.length
+    ? ` · installed on <b title="${esc(h.android.map(d => d.label).join('\n'))}">${bits.join(' + ')}</b>`
+    : ' · <span style="color:var(--muted)">not installed on any device</span>';
+  // Web-runtime holds are hard (one click to uninstall there). Android holds
+  // come from telemetry and cannot always be released by the phone (an app
+  // uninstall reports nothing), so they only warn — Delete stays enabled and
+  // asks for confirmation naming the devices.
+  const hardHold = h.web.length > 0;
+  btn.disabled = hardHold;
+  btn.title = h.deletable ? 'Remove this agent and all its published bundles'
+            : hardHold ? h.reason
+            : `${h.android.length} Android device record(s) still list this agent — Delete will ask to confirm`;
+}
+
 async function deleteAgent() {
   const a = state.agent;
+  const h = state.installs;
+  if (h && h.web.length) return toast(h.reason, true);
+  let force = false;
+  if (h && h.android.length) {
+    const devices = h.android.map(d => `• ${d.device_model || d.device_id} — installed v${d.version ?? '?'}, last seen ${(d.last_seen || '').replace('T', ' ').slice(0, 16)}`).join('\n');
+    if (!confirm(`${h.android.length} Android device record${h.android.length === 1 ? '' : 's'} still list "${a.name}":\n\n${devices}\n\n` +
+      'A phone that uninstalled the whole app never reports it, so these may be stale. If the agent is still on a device, its copy keeps working but can never be updated or retired.\n\nDelete anyway?')) return;
+    force = true;
+  }
   if (!confirm(`Delete the agent "${a.name}" entirely?\n\nEvery published bundle is removed from the server and it disappears from the store. This cannot be undone.`)) return;
   try {
-    const res = await api(`/api/agents/${a.id}`, { method:'DELETE' });
+    const res = await api(`/api/agents/${a.id}${force ? '?force=true' : ''}`, { method:'DELETE' });
     const n = (res.bundles_removed || []).length;
     toast(`Deleted ${a.name}${n ? ` and ${n} published bundle${n > 1 ? 's' : ''}` : ''}`);
     state.agent = null;

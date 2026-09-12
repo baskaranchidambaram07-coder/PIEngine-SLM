@@ -62,20 +62,23 @@ _FIELDS = (
 _CONTENT_KEYS = {"query", "prompt", "message", "messages", "answer", "text", "content"}
 
 
-_SCHEMA_READY = False
+# Paths whose schema this process has already ensured. Per path, not a single
+# flag: a caller opening a second database (tests, a report over a copied
+# file) would otherwise get a connection with no tables.
+_SCHEMA_READY: set[str] = set()
 
 
 def connect(path: str | Path = TELEMETRY_DB, ensure_schema: bool = True) -> sqlite3.Connection:
-    global _SCHEMA_READY
     conn = sqlite3.connect(str(path), timeout=8.0)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=8000")
-    # Only run the schema DDL once per process — repeated CREATE ... IF NOT
-    # EXISTS on every insert is a needless write-lock contender.
-    if ensure_schema and not _SCHEMA_READY:
+    # Only run the schema DDL once per process per file — repeated CREATE ...
+    # IF NOT EXISTS on every insert is a needless write-lock contender.
+    key = str(Path(path).resolve())
+    if ensure_schema and key not in _SCHEMA_READY:
         conn.executescript(SCHEMA)
         _migrate(conn)
-        _SCHEMA_READY = True
+        _SCHEMA_READY.add(key)
     return conn
 
 

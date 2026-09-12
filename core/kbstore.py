@@ -23,7 +23,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .embeddings import EMBEDDING_DIM
+from .embeddings import EMBEDDING_DIM  # default dimension; a KB's real one is read from its vectors
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS docs (
@@ -95,10 +95,13 @@ def _vectors(conn: sqlite3.Connection) -> tuple[list[int], np.ndarray]:
     rows = conn.execute("SELECT id, embedding FROM chunks ORDER BY id").fetchall()
     ids = [r[0] for r in rows]
     if rows:
+        # The dimension is whatever the KB was built with (384 for bge-small,
+        # 768 for bge-base or nomic, ...), read from the blobs themselves.
+        d = len(rows[0][1]) // 4
         mat = np.frombuffer(b"".join(r[1] for r in rows), dtype=np.float32)
-        mat = mat.reshape(len(rows), EMBEDDING_DIM)
+        mat = mat.reshape(len(rows), d)
     else:
-        mat = np.empty((0, EMBEDDING_DIM), dtype=np.float32)
+        mat = np.empty((0, dimension(conn)), dtype=np.float32)
 
     if stamp is not None:
         _cache[path] = (stamp, ids, mat)
@@ -108,8 +111,38 @@ def _vectors(conn: sqlite3.Connection) -> tuple[list[int], np.ndarray]:
     return ids, mat
 
 
+def get_meta(conn: sqlite3.Connection, key: str, default: str | None = None) -> str | None:
+    row = conn.execute("SELECT value FROM kb_meta WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else default
+
+
+def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute("INSERT OR REPLACE INTO kb_meta (key, value) VALUES (?, ?)", (key, value))
+    conn.commit()
+
+
+def embedder_of(conn: sqlite3.Connection) -> str | None:
+    """The embedder id this KB was built with (None for KBs older than the
+    catalogue, which were all built with the default)."""
+    return get_meta(conn, "embedder")
+
+
+def dimension(conn: sqlite3.Connection) -> int:
+    """Vector width of this KB: from its first blob, else its recorded
+    embedder, else the default."""
+    row = conn.execute("SELECT embedding FROM chunks LIMIT 1").fetchone()
+    if row:
+        return len(row[0]) // 4
+    d = get_meta(conn, "dim")
+    return int(d) if d else EMBEDDING_DIM
+
+
 def add_document(conn: sqlite3.Connection, name: str, chunks: list[str],
-                 embeddings: np.ndarray, meta: dict | None = None) -> int:
+                 embeddings: np.ndarray, meta: dict | None = None,
+                 embedder_id: str | None = None) -> int:
+    if embedder_id:
+        set_meta(conn, "embedder", embedder_id)
+        set_meta(conn, "dim", str(int(embeddings.shape[1])))
     cur = conn.execute("INSERT INTO docs (name, meta) VALUES (?, ?)",
                        (name, json.dumps(meta or {})))
     doc_id = cur.lastrowid
@@ -157,6 +190,9 @@ def search(conn: sqlite3.Connection, query_vec: np.ndarray, top_k: int = 4,
     ids, mat = _vectors(conn)
     if not ids:
         return []
+    if mat.shape[1] != query_vec.shape[0]:
+        raise ValueError(f"query vector has {query_vec.shape[0]} dims but this knowledge base was "
+                         f"built with {mat.shape[1]} — it must be re-embedded with the agent's embedder")
 
     scores = mat @ query_vec.astype(np.float32)
     k = min(top_k, len(ids))

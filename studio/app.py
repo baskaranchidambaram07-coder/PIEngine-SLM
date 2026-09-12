@@ -27,7 +27,8 @@ from pydantic import BaseModel
 
 import requests
 
-from core import (adapters, chunking, downloads, embeddings, ggufmeta, kbstore,
+from core import installs
+from core import (adapters, chunking, downloads, embedders, embeddings, ggufmeta, kbstore,
                   telemetry, versions)
 from core import catalog as catalog_mod
 from core.catalog import get_model
@@ -98,6 +99,11 @@ def save_agent(conn: sqlite3.Connection, agent_id: str, cfg: dict, version: int 
 
 DEFAULT_GENERATION = {"temperature": 0.7, "top_p": 0.8, "max_tokens": 768}
 DEFAULT_RAG = {"top_k": 4, "min_score": 0.45}
+# Guardrails are per-agent and OFF unless the author turns them on: the PII
+# Guard costs a model-judge call per turn and refuses whole documents, which
+# is right for an assistant that handles user files and wrong for one that
+# answers from a curated KB. Shipped in the manifest; the runtime enforces it.
+DEFAULT_GUARDRAILS = {"pii": False}
 
 
 class AgentIn(BaseModel):
@@ -111,6 +117,10 @@ class AgentIn(BaseModel):
     adapter_id: str = ""
     generation: dict = DEFAULT_GENERATION
     rag: dict = DEFAULT_RAG
+    guardrails: dict = DEFAULT_GUARDRAILS
+    # Which embedding model the knowledge base is built with (core/embedders.py).
+    # Changing it on an agent with documents re-embeds every chunk.
+    embedder_id: str = embedders.DEFAULT_EMBEDDER_ID
     tools: list[dict] = []
 
 
@@ -652,6 +662,74 @@ def model_download_progress():
 
 # ---------------------------------------------------------------- agents
 
+# ------------------------------------------------------------ embedding models
+
+def _embedder_view(e: dict) -> dict:
+    d = embedders.describe(e)
+    d["server_cached"] = embedders.server_cached(e)
+    d["device_cached"] = embedders.device_cached(e)
+    d["default"] = e["id"] == embedders.DEFAULT_EMBEDDER_ID
+    return d
+
+
+@app.get("/api/embedders")
+def list_embedders():
+    """The embedding models an agent can be built with, and whether each is
+    already present here (fastembed cache) and on the portal (GGUF for phones)."""
+    umap: dict[str, list[str]] = {}
+    for row in db().execute("SELECT id, config FROM agents").fetchall():
+        eid = embedders.get(json.loads(row[1]).get("embedder_id"))["id"]
+        umap.setdefault(eid, []).append(row[0])
+    out = []
+    for e in embedders.EMBEDDERS:
+        v = _embedder_view(e)
+        v["used_by"] = umap.get(e["id"], [])
+        out.append(v)
+    return out
+
+
+_embedder_downloads: dict[str, dict] = {}
+
+
+@app.post("/api/embedders/{embedder_id}/download")
+def download_embedder(embedder_id: str):
+    """Fetch both halves of an embedder: warm the fastembed model here, and
+    cache the GGUF so phones can pull it from the portal."""
+    entry = embedders.get(embedder_id)
+    if entry["id"] != embedder_id:
+        raise HTTPException(404, f"unknown embedder '{embedder_id}'")
+    prog = _embedder_downloads.setdefault(entry["id"], {"state": "idle", "error": None})
+    if prog["state"] == "running":
+        return {"ok": True, "state": "running"}
+
+    def run():
+        import threading as _t  # noqa: F401 — documents intent; the thread is below
+        prog.update({"state": "running", "error": None})
+        try:
+            embeddings.warm(entry["id"])
+            dest = MODELS_DIR / entry["gguf_file"]
+            if not dest.exists():
+                tmp = MODELS_DIR / (entry["gguf_file"] + ".part")
+                with requests.get(entry["gguf_url"], stream=True, timeout=60) as r:
+                    r.raise_for_status()
+                    with open(tmp, "wb") as fh:
+                        for chunk in r.iter_content(chunk_size=1 << 20):
+                            fh.write(chunk)
+                tmp.rename(dest)
+            prog["state"] = "done"
+        except Exception as exc:  # noqa: BLE001 — surfaced to the UI
+            prog.update({"state": "error", "error": str(exc)[:300]})
+
+    import threading
+    threading.Thread(target=run, daemon=True).start()
+    return {"ok": True, "state": "running"}
+
+
+@app.get("/api/embedders/downloads")
+def embedder_downloads():
+    return _embedder_downloads
+
+
 @app.get("/api/agents")
 def list_agents():
     conn = db()
@@ -665,6 +743,8 @@ def list_agents():
             "id": aid, "name": cfg.get("name"), "description": cfg.get("description"),
             "model_id": cfg.get("model_id"), "version": version, "updated_at": updated,
             "kb": kb_stats, "tools": len(cfg.get("tools", [])),
+            "guardrails": {**DEFAULT_GUARDRAILS, **(cfg.get("guardrails") or {})},
+            "embedder_id": embedders.get(cfg.get("embedder_id"))["id"],
         })
     return out
 
@@ -696,13 +776,43 @@ def get_agent(agent_id: str):
 @app.put("/api/agents/{agent_id}")
 def update_agent(agent_id: str, body: AgentIn):
     conn = db()
-    load_agent(conn, agent_id)  # 404 check
+    before = load_agent(conn, agent_id)  # 404 check
     save_agent(conn, agent_id, body.model_dump())
+    new_embedder = embedders.get(body.embedder_id)["id"]
+    old_embedder = embedders.get(before.get("embedder_id"))["id"]
+    if new_embedder != old_embedder and kb_path(agent_id).exists():
+        # The KB's vectors belong to the old model; rebuild them from the stored
+        # chunk text so the agent never searches a 768-d KB with a 384-d query.
+        reembed_kb(agent_id, new_embedder)
     return load_agent(conn, agent_id)
 
 
+def reembed_kb(agent_id: str, embedder_id: str) -> dict:
+    kb = kbstore.connect(kb_path(agent_id))
+    rows = kb.execute("SELECT id, text FROM chunks ORDER BY id").fetchall()
+    if rows:
+        texts = [r[1] for r in rows]
+        vecs = embeddings.embed_passages(texts, embedder_id)
+        kb.executemany("UPDATE chunks SET embedding = ? WHERE id = ?",
+                       [(vecs[i].astype("float32").tobytes(), rows[i][0]) for i in range(len(rows))])
+        kb.commit()
+    kbstore.set_meta(kb, "embedder", embedder_id)
+    kbstore.set_meta(kb, "dim", str(embedders.get(embedder_id)["dim"]))
+    kbstore.invalidate(kb)
+    kb.close()   # Windows: an open handle would make a later delete's unlink fail
+    return {"agent_id": agent_id, "embedder": embedder_id, "chunks": len(rows)}
+
+
+@app.post("/api/agents/{agent_id}/reembed")
+def api_reembed(agent_id: str):
+    cfg = load_agent(db(), agent_id)
+    if not kb_path(agent_id).exists():
+        return {"agent_id": agent_id, "embedder": embedders.get(cfg.get("embedder_id"))["id"], "chunks": 0}
+    return reembed_kb(agent_id, embedders.get(cfg.get("embedder_id"))["id"])
+
+
 @app.delete("/api/agents/{agent_id}")
-def delete_agent(agent_id: str):
+def delete_agent(agent_id: str, force: bool = False):
     """Remove the agent from the server entirely.
 
     Works whether the agent was ever published or is still in the creation
@@ -714,6 +824,26 @@ def delete_agent(agent_id: str):
     conn = db()
     load_agent(conn, agent_id)
 
+    # Refuse while any device still runs it. A deleted definition cannot be
+    # updated, retired or reinstalled, so a copy left on a device would be
+    # orphaned for good. The web runtime is read from disk; handsets are
+    # known through their install/uninstall telemetry (core/installs.py).
+    held = installs.holders(agent_id)
+    if held["web"]:
+        # The web runtime is on this machine and one click away — never bypass.
+        raise HTTPException(409, installs.describe_block(held))
+    if held["android"] and not force:
+        # Handsets are known only through telemetry. A phone that uninstalled
+        # the whole app (or was reset) never reports an `uninstall`, so its
+        # record would block this delete for STALE_DAYS. The admin may override
+        # with force=true after seeing which devices are listed; their copies
+        # keep running but can never be updated or retired.
+        raise HTTPException(409, installs.describe_block(held) +
+                            " If those devices no longer have the app, delete with force=true.")
+    if held["android"] and force:
+        telemetry.record(source="studio", event="forced_delete", agent_id=agent_id, ok=1,
+                         detail=f"deleted while {len(held['android'])} Android device record(s) still held it")
+
     removed = []
     for v in versions.bundle_versions(agent_id):
         path = BUNDLES_DIR / versions.bundle_name(agent_id, v)
@@ -724,8 +854,31 @@ def delete_agent(agent_id: str):
 
     conn.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
     conn.commit()
-    kb_path(agent_id).unlink(missing_ok=True)
-    return {"ok": True, "agent_id": agent_id, "bundles_removed": sorted(removed, reverse=True)}
+    kb_left = None
+    try:
+        kb_path(agent_id).unlink(missing_ok=True)
+    except PermissionError:
+        # Windows refuses to unlink a SQLite file another handle still holds.
+        # The agent row is already gone; retry once after collecting stale
+        # connections, and otherwise report the leftover rather than fail.
+        import gc
+        gc.collect()
+        try:
+            kb_path(agent_id).unlink(missing_ok=True)
+        except PermissionError:
+            kb_left = str(kb_path(agent_id))
+    return {"ok": True, "agent_id": agent_id, "bundles_removed": sorted(removed, reverse=True),
+            "kb_file_left": kb_left}
+
+
+@app.get("/api/agents/{agent_id}/installs")
+def agent_installs(agent_id: str):
+    """Where this agent is currently installed — what gates Delete."""
+    load_agent(db(), agent_id)
+    h = installs.holders(agent_id)
+    h["deletable"] = h["total"] == 0
+    h["reason"] = None if h["deletable"] else installs.describe_block(h)
+    return h
 
 
 # ---------------------------------------------------------------- knowledge base
@@ -733,7 +886,8 @@ def delete_agent(agent_id: str):
 @app.post("/api/agents/{agent_id}/docs")
 async def upload_docs(agent_id: str, files: list[UploadFile] = File(...)):
     conn = db()
-    load_agent(conn, agent_id)
+    cfg = load_agent(conn, agent_id)
+    embedder_id = embedders.get(cfg.get("embedder_id"))["id"]
     kb = kbstore.connect(kb_path(agent_id))
     results = []
     for f in files:
@@ -743,11 +897,13 @@ async def upload_docs(agent_id: str, files: list[UploadFile] = File(...)):
         if not chunks:
             results.append({"name": f.filename, "error": "no extractable text"})
             continue
-        vecs = embeddings.embed_passages(chunks)
+        vecs = embeddings.embed_passages(chunks, embedder_id)
         doc_id = kbstore.add_document(kb, f.filename, chunks, vecs,
-                                      meta={"bytes": len(data)})
+                                      meta={"bytes": len(data)}, embedder_id=embedder_id)
         results.append({"name": f.filename, "doc_id": doc_id, "chunks": len(chunks)})
-    return {"uploaded": results, "stats": kbstore.stats(kb)}
+    stats = kbstore.stats(kb)
+    kb.close()
+    return {"uploaded": results, "stats": stats}
 
 
 @app.get("/api/agents/{agent_id}/docs")
@@ -773,9 +929,13 @@ def test_search(agent_id: str, body: SearchIn):
     kbp = kb_path(agent_id)
     if not kbp.exists():
         return {"results": []}
+    cfg = load_agent(db(), agent_id)
     kb = kbstore.connect(kbp)
-    qvec = embeddings.embed_query(body.query)
-    return {"results": kbstore.search(kb, qvec, top_k=body.top_k)}
+    qvec = embeddings.embed_query(body.query, embedders.get(cfg.get("embedder_id"))["id"])
+    try:
+        return {"results": kbstore.search(kb, qvec, top_k=body.top_k)}
+    finally:
+        kb.close()
 
 
 # ---------------------------------------------------------------- publish
@@ -813,6 +973,7 @@ def publish(agent_id: str):
         "system_prompt": cfg.get("system_prompt", ""),
         "generation": cfg.get("generation", DEFAULT_GENERATION),
         "rag": {**cfg.get("rag", DEFAULT_RAG), **kb_stats},
+        "guardrails": {**DEFAULT_GUARDRAILS, **(cfg.get("guardrails") or {})},
         "tools": cfg.get("tools", []),
         "model": {
             "id": model["id"], "name": model["name"], "file": model["file"],
@@ -820,7 +981,7 @@ def publish(agent_id: str):
             "size_bytes": model.get("size_bytes"),
             "context_length": model["context_length"], "family": model["family"],
         },
-        "embedder": {"id": embeddings.EMBEDDER_ID, "dim": embeddings.EMBEDDING_DIM},
+        "embedder": embedders.manifest_entry(embedders.get(cfg.get("embedder_id"))),
     }
 
     # A tuned agent carries its adapter descriptor, not the adapter file: the
