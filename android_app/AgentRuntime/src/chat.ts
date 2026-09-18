@@ -224,6 +224,15 @@ export async function runChat(
   } catch (e: any) {
     const msg = String(e?.message || e).slice(0, 400);
     await log(`chat: ERROR ${msg}`);
+    // Same reasoning as llm.ts's model-load failures: a native exception
+    // during completion (not just init) crosses the JSI boundary as the bare
+    // string "Unknown error" too, and its real text only reaches logcat —
+    // pull the relevant tail into the in-app log so the next occurrence is
+    // diagnosable from the 📋 Logs screen alone, without adb access.
+    try {
+      const { dumpLogcatToLog } = require('./logcat');
+      await dumpLogcatToLog(`chat ${agentId}`);
+    } catch {}
     reportTelemetry({ event: 'error', agent_id: agentId,
                       model_id: manifest.model?.id, detail: msg, ok: 0 });
     onEvent({ type: 'error', text: msg });

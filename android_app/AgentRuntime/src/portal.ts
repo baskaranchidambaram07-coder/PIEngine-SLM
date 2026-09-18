@@ -10,6 +10,7 @@ import {
 } from './config';
 import { embedderOf } from './embedder';
 import { log } from './logger';
+import { APP_VERSION } from './config';
 
 const PORTAL_KEY = 'portal_url_v1';
 const VERSION_STATE_KEY = 'version_states_v1';
@@ -64,6 +65,30 @@ export async function refreshVersionStates(): Promise<VersionStates> {
 
 export async function versionStateOf(id: string, version: number): Promise<string> {
   return stateFrom(await loadVersionStates(), id, version);
+}
+
+// -------------------------------------------------------- app-version gating
+// Some builtin tools (schedule_event — see Studio's
+// TOOL_MIN_APP_VERSION) only exist on the on-device dispatcher
+// (src/tools.ts) from a given app release onward. An agent that attaches one
+// carries min_app_version in its manifest (and in the lighter store
+// listing); a build older than that has no matching case for the tool name
+// and would silently fail whatever the agent's instructions promise. Compare
+// against this app's own APP_VERSION rather than special-casing any one tool
+// or version here, so a future gate needs no client change beyond the table
+// in the Studio.
+function versionAtLeast(have: string, need: string): boolean {
+  const a = have.split('.').map(n => parseInt(n, 10) || 0);
+  const b = need.split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i] || 0, y = b[i] || 0;
+    if (x !== y) return x > y;
+  }
+  return true;
+}
+
+export function isAppCompatible(minAppVersion?: string | null): boolean {
+  return !minAppVersion || versionAtLeast(APP_VERSION, minAppVersion);
 }
 
 export async function getPortalUrl(): Promise<string> {
@@ -146,6 +171,10 @@ export type StoreEntry = {
   kb: { docs: number; chunks: number };
   tools: number;
   installed_version?: number;
+  // Present only when an attached tool needs a newer app build than some —
+  // see isAppCompatible(). Absent (older portal, or no gated tool) means
+  // compatible with every app version.
+  min_app_version?: string | null;
 };
 
 export async function fetchStore(): Promise<StoreEntry[]> {
@@ -175,6 +204,8 @@ export type InstalledAgent = {
   adapterReady: boolean;
   /** 'active' | 'disabled' | 'deleted' — a retired version must not run. */
   versionState: string;
+  /** From manifest.min_app_version — null/undefined means no gated tool. */
+  minAppVersion: string | null;
 };
 
 export async function listInstalled(): Promise<InstalledAgent[]> {
@@ -197,6 +228,7 @@ export async function listInstalled(): Promise<InstalledAgent[]> {
         adapterReady: !manifest.adapter ||
           await fs.exists(`${ADAPTERS_DIR}/${manifest.adapter.file}`),
         versionState: stateFrom(await loadVersionStates(), id, manifest.version),
+        minAppVersion: manifest.min_app_version ?? null,
       });
     } catch {}
   }

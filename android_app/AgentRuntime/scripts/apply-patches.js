@@ -91,6 +91,23 @@ const patches = [
         '            chatTemplates.setProperty(runtime, "jinja", jinjaFallback);\n' +
         '        }\n' +
         '        model.setProperty(runtime, "chatTemplates", chatTemplates);\n' },
+  // ---- Full LTO -> ThinLTO (2026-09-17): full -flto merges every
+  //      translation unit's bitcode into one module before running codegen
+  //      passes over it, and ld.lld ran out of memory doing that for this
+  //      target (all mtmd model backends + every CPU ISA variant) on this
+  //      16GB build box, twice in a row with no other heavy process running.
+  //      ThinLTO keeps per-TU summaries and optimizes in parallel, which is
+  //      far lighter on peak memory, at a negligible codegen cost for an
+  //      inference engine like this one.
+  { file: 'node_modules/llama.rn/android/src/main/CMakeLists.txt',
+    from: '    target_link_options(${jni_name} PRIVATE -flto)\n',
+    to: '    target_link_options(${jni_name} PRIVATE -flto=thin)\n' },
+  { file: 'node_modules/llama.rn/android/src/main/rnllama/CMakeLists.txt',
+    from: '    target_compile_options(${target_name} PRIVATE -DLM_GGML_USE_CPU -DLM_GGML_USE_CPU_REPACK -pthread ${cpu_flags} -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE)\n',
+    to: '    target_compile_options(${target_name} PRIVATE -DLM_GGML_USE_CPU -DLM_GGML_USE_CPU_REPACK -pthread ${cpu_flags} -fvectorize -ffp-model=fast -fno-finite-math-only -flto=thin -D_GNU_SOURCE)\n' },
+  { file: 'node_modules/llama.rn/android/src/main/rnllama/CMakeLists.txt',
+    from: '    target_link_options(${target_name} PRIVATE -flto)\n',
+    to: '    target_link_options(${target_name} PRIVATE -flto=thin)\n' },
 ];
 
 for (const p of patches) {

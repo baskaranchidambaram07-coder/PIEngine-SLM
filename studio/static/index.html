@@ -68,7 +68,7 @@
   .result{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;margin-top:10px;font-size:12.5px}
   .result .score{color:var(--accent2);font-weight:600;font-size:11px}
   .result .src{color:var(--muted);font-size:11px;margin-bottom:5px}
-  .toast{position:fixed;bottom:24px;right:24px;background:var(--panel);border:1px solid var(--accent);color:var(--text);padding:12px 18px;border-radius:8px;font-size:13px;opacity:0;transition:opacity .3s;z-index:99;max-width:420px;box-shadow:var(--shadow-lg)}
+  .toast{position:fixed;bottom:24px;right:24px;background:var(--panel);border:1px solid var(--accent);color:var(--text);padding:12px 18px;border-radius:8px;font-size:13px;opacity:0;transition:opacity .3s;z-index:99;max-width:420px;box-shadow:var(--shadow-lg);pointer-events:none}
   .toast.show{opacity:1}
   .toast.err{border-color:var(--danger)}
   .empty{color:var(--muted);text-align:center;padding:40px 0;font-size:13px}
@@ -130,6 +130,8 @@ const TOOL_TEMPLATES = [
     parameters:{type:'object',properties:{}}, config:{} },
   { name:'draft_email', kind:'builtin', description:'Draft a follow-up email in the device outbox for user review.',
     parameters:{type:'object',properties:{to:{type:'string'},subject:{type:'string'},body:{type:'string'}},required:['to','subject','body']}, config:{} },
+  { name:'schedule_event', kind:'builtin', description:'Create a calendar event for a follow-up or meeting. Stored on-device; on a handset this opens the Calendar app pre-filled for the user to confirm.',
+    parameters:{type:'object',properties:{title:{type:'string'},start:{type:'string',description:'ISO 8601 date-time, e.g. 2026-09-20T15:00:00'},duration_minutes:{type:'integer',description:'Default 30'},description:{type:'string'},attendees:{type:'array',items:{type:'string'}}},required:['title','start']}, config:{} },
   { name:'jira_search', kind:'http', description:'Search Jira issues by text. Requires network; degrades gracefully offline.',
     parameters:{type:'object',properties:{query:{type:'string',description:'Search text or JQL'}},required:['query']},
     config:{method:'GET', url:'https://YOUR-DOMAIN.atlassian.net/rest/api/3/search?jql=text~"{query}"', headers:{Authorization:'Basic <base64 email:api_token>'}} },
@@ -164,6 +166,7 @@ async function render() {
             <span class="chip">${a.kb.docs} docs · ${a.kb.chunks} chunks</span>
             <span class="chip">${a.tools} tools</span>
             ${(a.guardrails && a.guardrails.pii) ? '<span class="chip green">🛡 PII Guard</span>' : ''}
+            ${a.min_app_version ? `<span class="chip" title="Needs one of the tools attached to this agent">📱 needs app v${a.min_app_version}+</span>` : ''}
             ${a.version ? `<span class="chip green">published v${a.version}</span>` : '<span class="chip">draft</span>'}
           </div>
         </div>`).join('')}</div>`
@@ -458,6 +461,20 @@ function renderDetails(body) {
         <span><b>🛡 PII Guard</b></span>
       </label>
     </div>
+    <div class="panel"><h3>Document analysis</h3>
+      <label class="check" style="display:flex;align-items:center;gap:10px;margin:0;font-weight:500;color:var(--text);font-size:13px;cursor:pointer">
+        <input id="f-analysis" type="checkbox" style="width:16px;height:16px;accent-color:var(--accent)"
+               ${(a.analysis && a.analysis.enabled) ? 'checked' : ''}
+               onchange="toggleAnalysis(this.checked)">
+        <span><b>🔎 Whole-document analysis</b></span>
+      </label>
+      <div class="info" style="margin-top:8px">
+        When a large file is attached, read the ENTIRE document in sections and digest it
+        before answering, instead of retrieving only the passages closest to the question.
+        Right for an agent that extracts or summarizes a whole document (meeting minutes,
+        contract review). Leave off for a Q&amp;A agent — it should keep using targeted retrieval.
+      </div>
+    </div>
     <div class="panel"><h3>Scenario tuning (LoRA adapter)</h3>
       <div class="info" style="margin-bottom:10px">
         An adapter changes how this model behaves — citation discipline, refusals,
@@ -524,6 +541,7 @@ async function saveDetails() {
     generation: { temperature:+$('f-temp').value, top_p:+$('f-topp').value, max_tokens:+$('f-maxtok').value },
     rag: { top_k:+$('f-topk').value, min_score:+$('f-minscore').value },
     guardrails: { ...(a.guardrails||{}), pii: $('f-guard-pii').checked },
+    analysis: { ...(a.analysis||{}), enabled: $('f-analysis').checked },
     embedder_id: a.embedder_id || 'bge-small-en-v1.5',
     tools: a.tools || [],
   };
@@ -647,10 +665,27 @@ async function toggleGuardrail(name, on) {
     state.agent = await api('/api/agents/' + a.id, { method:'PUT', json:{
       name:a.name, description:a.description, scenario:a.scenario, system_prompt:a.system_prompt,
       model_id:a.model_id, adapter_id:a.adapter_id||'', generation:a.generation,
-      rag:a.rag, guardrails:a.guardrails, embedder_id:a.embedder_id||'bge-small-en-v1.5', tools:a.tools||[] }});
+      rag:a.rag, guardrails:a.guardrails, analysis:a.analysis||{enabled:false},
+      embedder_id:a.embedder_id||'bge-small-en-v1.5', tools:a.tools||[] }});
     toast(on ? '🛡 PII Guard saved as ON — publish a new version to ship it to devices'
              : 'PII Guard saved as OFF — publish a new version to ship it');
   } catch (e) { toast('Could not save guardrail: ' + e.message, true); }
+}
+
+// Same immediate-save pattern as toggleGuardrail — a separate function because
+// the two switches are independent and unrelated in meaning.
+async function toggleAnalysis(on) {
+  const a = state.agent;
+  a.analysis = { ...(a.analysis||{}), enabled: !!on };
+  try {
+    state.agent = await api('/api/agents/' + a.id, { method:'PUT', json:{
+      name:a.name, description:a.description, scenario:a.scenario, system_prompt:a.system_prompt,
+      model_id:a.model_id, adapter_id:a.adapter_id||'', generation:a.generation,
+      rag:a.rag, guardrails:a.guardrails||{pii:false}, analysis:a.analysis,
+      embedder_id:a.embedder_id||'bge-small-en-v1.5', tools:a.tools||[] }});
+    toast(on ? '🔎 Whole-document analysis saved as ON — publish a new version to ship it'
+             : 'Whole-document analysis saved as OFF — publish a new version to ship it');
+  } catch (e) { toast('Could not save this setting: ' + e.message, true); }
 }
 
 async function persistTools() {
@@ -658,7 +693,8 @@ async function persistTools() {
   state.agent = await api('/api/agents/' + a.id, { method:'PUT', json:{
     name:a.name, description:a.description, scenario:a.scenario, system_prompt:a.system_prompt,
     model_id:a.model_id, adapter_id:a.adapter_id||'', generation:a.generation,
-    rag:a.rag, guardrails:a.guardrails||{pii:false}, embedder_id:a.embedder_id||'bge-small-en-v1.5', tools:a.tools }});
+    rag:a.rag, guardrails:a.guardrails||{pii:false}, analysis:a.analysis||{enabled:false},
+    embedder_id:a.embedder_id||'bge-small-en-v1.5', tools:a.tools }});
 }
 
 // Embedder choice persists immediately (like guardrails and tools): the server
@@ -674,7 +710,8 @@ async function setEmbedder(id) {
     state.agent = await api('/api/agents/' + a.id, { method:'PUT', json:{
       name:a.name, description:a.description, scenario:a.scenario, system_prompt:a.system_prompt,
       model_id:a.model_id, adapter_id:a.adapter_id||'', generation:a.generation,
-      rag:a.rag, guardrails:a.guardrails||{pii:false}, embedder_id:id, tools:a.tools||[] }});
+      rag:a.rag, guardrails:a.guardrails||{pii:false}, analysis:a.analysis||{enabled:false},
+      embedder_id:id, tools:a.tools||[] }});
     toast(chunks ? `Knowledge base re-embedded with ${id} — publish a new version to ship it` : `Embedding model set to ${id}`);
   } catch (e) { toast('Could not change the embedder: ' + e.message, true); }
   renderEditor();
@@ -727,6 +764,10 @@ async function renderPublish(body) {
         <tr><td style="width:220px;color:var(--muted)">Agent</td><td><b>${esc(a.name)}</b> — next version v${a.version+1}</td></tr>
         <tr><td style="color:var(--muted)">manifest.json</td><td>persona, system prompt, generation params, RAG config, guardrails, ${(a.tools||[]).length} tool definition(s)</td></tr>
         <tr><td style="color:var(--muted)">Guardrails</td><td>${(a.guardrails && a.guardrails.pii) ? '🛡 PII Guard <b>on</b> — messages, files and answers are screened on the device' : 'none — PII Guard off (enable it in the Guardrails panel)'}</td></tr>
+        <tr><td style="color:var(--muted)">Document analysis</td><td>${(a.analysis && a.analysis.enabled) ? '🔎 Whole-document analysis <b>on</b> — a large attachment is digested in full instead of retrieved by question' : 'off — attachments use targeted retrieval'}</td></tr>
+        <tr><td style="color:var(--muted)">Android app compatibility</td><td>${a.min_app_version
+          ? `📱 needs app <b>v${a.min_app_version}+</b> — one or more attached tools have no real handoff on an older build; a handset behind that version won't be able to install or run this agent`
+          : 'none — every attached tool works on any app version'}</td></tr>
         <tr><td style="color:var(--muted)">kb.sqlite</td><td>${a.kb ? `${a.kb.docs} docs / ${a.kb.chunks} chunks with 384-dim embeddings` : 'empty'}</td></tr>
         <tr><td style="color:var(--muted)">Model (cached separately)</td><td>${esc(model.name||a.model_id)} — ${model.size_gb} GB GGUF, downloaded once per device, shared across agents</td></tr>
         <tr><td style="color:var(--muted)">Scenario tuning</td><td>${a.adapter_id

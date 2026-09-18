@@ -1,8 +1,8 @@
 """On-device tool dispatcher.
 
 Mirrors what a mobile runtime would do natively:
-- ``builtin`` tools touch device-local storage (calendar, action items, outbox)
-  and always work offline.
+- ``builtin`` tools touch device-local storage (calendar, action items, outbox,
+  notes) and always work offline.
 - ``http`` tools call enterprise APIs (Jira, Confluence, ...) when the device
   has connectivity and degrade gracefully — the agent gets a structured error
   it can explain to the user — when offline.
@@ -10,16 +10,27 @@ Mirrors what a mobile runtime would do natively:
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 DEVICE_DATA = Path(__file__).resolve().parent / "device_storage" / "device_data.json"
 
 
 def _load() -> dict:
+    """Read device_data.json, backfilling any list this file predates.
+
+    A file already on disk from before "notes"/"events" existed would KeyError
+    the first time either new tool ran, since json.loads returns exactly what
+    was written — nothing here ever merged in new keys. setdefault leaves
+    whatever is already on disk untouched and only fills in what's missing.
+    """
+    defaults = {"action_items": [], "outbox": [], "notes": [], "events": [], "calendar": None}
     if DEVICE_DATA.exists():
-        return json.loads(DEVICE_DATA.read_text(encoding="utf-8"))
-    return {"action_items": [], "outbox": [], "calendar": None}
+        data = json.loads(DEVICE_DATA.read_text(encoding="utf-8"))
+        for key, value in defaults.items():
+            data.setdefault(key, value)
+        return data
+    return dict(defaults)
 
 
 def _save(data: dict) -> None:
@@ -89,6 +100,33 @@ def _execute_builtin(name: str, args: dict) -> dict:
         _save(data)
         return {"drafted": {k: draft[k] for k in ("id", "to", "subject", "status")},
                 "note": "Draft saved to device outbox for user review. Never auto-sent."}
+
+    if name == "schedule_event":
+        start = args.get("start") or (datetime.now() + timedelta(days=1)).replace(
+            hour=15, minute=0, second=0, microsecond=0).isoformat(timespec="minutes")
+        event = {
+            "id": len(data["events"]) + 1,
+            "title": args.get("title", "Untitled event"),
+            "start": start,
+            "duration_minutes": int(args.get("duration_minutes") or 30),
+            "description": args.get("description", ""),
+            "attendees": args.get("attendees") or [],
+            "status": "scheduled — awaiting user confirmation",
+            "created": date.today().isoformat(),
+        }
+        data["events"].append(event)
+        _save(data)
+        # Echo back an ack, not the full record: the model just wrote
+        # "description"/"attendees" itself (they're already in this round's
+        # tool-call args, which the UI shows alongside this result), and
+        # echoing prose fields back on every tool call measurably blew the
+        # context budget on Android's small on-device context window by the
+        # next round (2048 tokens; no such limit server-side).
+        return {"scheduled": {"id": event["id"], "title": event["title"], "start": event["start"],
+                               "duration_minutes": event["duration_minutes"], "status": event["status"]},
+                "note": "Event created on the device calendar (simulated here). On a phone this "
+                        "opens the Calendar app pre-filled for the user to review and tap Save."}
+
 
     return {"error": f"unknown builtin tool '{name}'"}
 

@@ -15,9 +15,10 @@ import {
 import { C } from './src/theme';
 import { DEFAULT_PORTAL } from './src/config';
 import {
-  fetchStore, getPortalUrl, installAgent, InstalledAgent, listInstalled,
+  fetchStore, getPortalUrl, installAgent, InstalledAgent, isAppCompatible, listInstalled,
   Progress, setPortalUrl, StoreEntry, uninstallAgent,
 } from './src/portal';
+import { APP_VERSION } from './src/config';
 import { runChat } from './src/chat';
 import { ChatTurn, listBlockedModels, unblockAllModels } from './src/llm';
 import { clearVectorCache, inlineStats, SearchHit } from './src/kb';
@@ -176,6 +177,14 @@ export default function App() {
     if (agent.versionState && agent.versionState !== 'active') {
       setMsgs(m => [...m, { id: nextId(), kind: 'bot',
         text: `${agent.name} v${agent.version} has been ${agent.versionState} by the Studio and can no longer be run. Open the store to install a newer version.` }]);
+      return;
+    }
+    // Belt-and-suspenders alongside the store-screen gate: an agent whose
+    // tools need a newer app build than this one must not silently run with
+    // those tools broken (see isAppCompatible / min_app_version).
+    if (!isAppCompatible(agent.minAppVersion)) {
+      setMsgs(m => [...m, { id: nextId(), kind: 'bot',
+        text: `${agent.name} needs app v${agent.minAppVersion}+ to work correctly (this build is v${APP_VERSION}). Update the app before using it.` }]);
       return;
     }
     const att = attachmentRef.current;
@@ -447,8 +456,15 @@ export default function App() {
       <ScrollView contentContainerStyle={{ padding: 14 }}>
         <Text style={st.section}>INSTALLED AGENTS</Text>
         {installed.length === 0 && <Text style={st.empty}>Nothing installed yet — sync with the portal below.</Text>}
-        {installed.map(a => (
+        {installed.map(a => {
+          const compatible = isAppCompatible(a.minAppVersion);
+          return (
           <TouchableOpacity key={a.id} style={st.card} onPress={() => {
+            if (!compatible) {
+              Alert.alert('App update needed',
+                `${a.name} needs app v${a.minAppVersion}+ (this build is v${APP_VERSION}). Update the app to run it.`);
+              return;
+            }
             if (!a.modelReady || !a.embedderReady) {
               Alert.alert('Model missing', 'Re-install from the store to fetch the model files.');
               return;
@@ -461,15 +477,17 @@ export default function App() {
               {guard.piiEnabled(a.manifest) ? ' · 🛡 PII Guard' : ''}
             </Text>
             <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-              <Text style={a.modelReady ? st.ready : st.warn}>
-                {a.modelReady ? '✓ offline-ready — tap to chat' : '⚠ model files missing'}
+              <Text style={!compatible ? st.warn : a.modelReady ? st.ready : st.warn}>
+                {!compatible ? `⚠ needs app v${a.minAppVersion}+ — update the app`
+                  : a.modelReady ? '✓ offline-ready — tap to chat' : '⚠ model files missing'}
               </Text>
               <TouchableOpacity onPress={() => onUninstall(a)} hitSlop={8}>
                 <Text style={st.uninstall}>Uninstall</Text>
               </TouchableOpacity>
             </View>
           </TouchableOpacity>
-        ))}
+          );
+        })}
 
         <View style={st.storeHead}>
           <Text style={st.section}>AGENT STORE</Text>
@@ -482,11 +500,12 @@ export default function App() {
         {!storeError && store.length > 0 &&
           <Text style={{ color: C.green, fontSize: 11.5, marginBottom: 8 }}>✓ connected — {store.length} agent{store.length > 1 ? 's' : ''} published</Text>}
         {store.map(p => {
+          const compatible = isAppCompatible(p.min_app_version);
           const stateLabel = installing[p.id]
             ? installing[p.id]
             : p.installed_version === p.version ? 'installed'
             : p.installed_version ? `Update v${p.installed_version} → v${p.version}` : 'Install';
-          const actionable = !installing[p.id] && p.installed_version !== p.version;
+          const actionable = compatible && !installing[p.id] && p.installed_version !== p.version;
           return (
             <View key={p.id} style={st.card}>
               <Text style={st.cardTitle}>{p.name} <Text style={st.mutedSm}>v{p.version}</Text></Text>
@@ -494,7 +513,9 @@ export default function App() {
               <Text style={st.mutedSm}>
                 bundle {(p.bundle_bytes / 1024).toFixed(0)} KB · model {p.model.size_gb} GB · {p.kb.chunks} chunks · {p.tools} tools
               </Text>
-              {actionable ? (
+              {!compatible ? (
+                <Text style={st.warn}>⚠ needs app v{p.min_app_version}+ — this build is v{APP_VERSION}, update the app to install</Text>
+              ) : actionable ? (
                 <TouchableOpacity style={st.installBtn} onPress={() => onInstall(p)}>
                   <Text style={{ color: '#fff', fontWeight: '600', fontSize: 13 }}>{stateLabel}</Text>
                 </TouchableOpacity>

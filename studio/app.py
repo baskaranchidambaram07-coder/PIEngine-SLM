@@ -104,6 +104,31 @@ DEFAULT_RAG = {"top_k": 4, "min_score": 0.45}
 # is right for an assistant that handles user files and wrong for one that
 # answers from a curated KB. Shipped in the manifest; the runtime enforces it.
 DEFAULT_GUARDRAILS = {"pii": False}
+# Whole-document analysis is also opt-in and off by default: it costs a
+# map-reduce pass of extra model calls per attachment and is only correct for
+# an extract/summarize agent, not a targeted-retrieval Q&A agent — see
+# runtime/app.py analysis_mode_enabled().
+DEFAULT_ANALYSIS = {"enabled": False}
+
+# Some builtin tools only exist on the on-device dispatcher
+# (android_app/AgentRuntime/src/tools.ts) from a given app release onward — an
+# older app binary has no matching case for the tool name and would return
+# "unknown builtin tool" instead of doing anything useful. This table is the
+# single source of truth for that; an agent's min_app_version is always
+# computed from it, never hand-set (see min_app_version_for below).
+TOOL_MIN_APP_VERSION = {
+    "schedule_event": "3.1",  # real Calendar-app handoff via the CalendarInsert native module
+}
+
+
+def min_app_version_for(tools: list[dict]) -> str | None:
+    """Highest Android app version required by this agent's attached tools,
+    or None if every attached tool predates any version gate."""
+    needed = [TOOL_MIN_APP_VERSION[t["name"]] for t in tools
+              if t.get("name") in TOOL_MIN_APP_VERSION]
+    if not needed:
+        return None
+    return max(needed, key=lambda v: tuple(int(x) for x in v.split(".")))
 
 
 class AgentIn(BaseModel):
@@ -121,6 +146,9 @@ class AgentIn(BaseModel):
     # Which embedding model the knowledge base is built with (core/embedders.py).
     # Changing it on an agent with documents re-embeds every chunk.
     embedder_id: str = embedders.DEFAULT_EMBEDDER_ID
+    # Whole-document analysis: on, a large attachment is read in full via a
+    # map-reduce digest instead of top-k retrieval. See runtime/app.py.
+    analysis: dict = DEFAULT_ANALYSIS
     tools: list[dict] = []
 
 
@@ -744,7 +772,9 @@ def list_agents():
             "model_id": cfg.get("model_id"), "version": version, "updated_at": updated,
             "kb": kb_stats, "tools": len(cfg.get("tools", [])),
             "guardrails": {**DEFAULT_GUARDRAILS, **(cfg.get("guardrails") or {})},
+            "analysis": {**DEFAULT_ANALYSIS, **(cfg.get("analysis") or {})},
             "embedder_id": embedders.get(cfg.get("embedder_id"))["id"],
+            "min_app_version": min_app_version_for(cfg.get("tools", [])),
         })
     return out
 
@@ -770,6 +800,7 @@ def get_agent(agent_id: str):
     cfg = load_agent(conn, agent_id)
     kbp = kb_path(agent_id)
     cfg["kb"] = kbstore.stats(kbstore.connect(kbp)) if kbp.exists() else {"docs": 0, "chunks": 0}
+    cfg["min_app_version"] = min_app_version_for(cfg.get("tools", []))
     return cfg
 
 
@@ -784,7 +815,9 @@ def update_agent(agent_id: str, body: AgentIn):
         # The KB's vectors belong to the old model; rebuild them from the stored
         # chunk text so the agent never searches a 768-d KB with a 384-d query.
         reembed_kb(agent_id, new_embedder)
-    return load_agent(conn, agent_id)
+    cfg = load_agent(conn, agent_id)
+    cfg["min_app_version"] = min_app_version_for(cfg.get("tools", []))
+    return cfg
 
 
 def reembed_kb(agent_id: str, embedder_id: str) -> dict:
@@ -974,7 +1007,12 @@ def publish(agent_id: str):
         "generation": cfg.get("generation", DEFAULT_GENERATION),
         "rag": {**cfg.get("rag", DEFAULT_RAG), **kb_stats},
         "guardrails": {**DEFAULT_GUARDRAILS, **(cfg.get("guardrails") or {})},
+        "analysis": {**DEFAULT_ANALYSIS, **(cfg.get("analysis") or {})},
         "tools": cfg.get("tools", []),
+        # Frozen at this version's publish time — an older, already-published
+        # version keeps the requirement it was actually built with even if
+        # TOOL_MIN_APP_VERSION grows later.
+        "min_app_version": min_app_version_for(cfg.get("tools", [])),
         "model": {
             "id": model["id"], "name": model["name"], "file": model["file"],
             "download_url": model["download_url"], "size_gb": model["size_gb"],
@@ -1016,6 +1054,7 @@ def publish(agent_id: str):
         "bundle": bundle_name, "bundle_bytes": bundle_file.stat().st_size,
         "model": manifest["model"], "adapter": manifest.get("adapter"),
         "kb": kb_stats, "tools": len(manifest["tools"]),
+        "min_app_version": manifest.get("min_app_version"),
     })
     registry_path().write_text(json.dumps(registry, indent=2), encoding="utf-8")
 
@@ -1048,6 +1087,7 @@ def registry_entry_from_bundle(agent_id: str, version: int) -> dict | None:
         "model": m.get("model"), "adapter": m.get("adapter"),
         "kb": {"docs": rag.get("docs", 0), "chunks": rag.get("chunks", 0)},
         "tools": len(m.get("tools", [])),
+        "min_app_version": m.get("min_app_version"),
     }
 
 

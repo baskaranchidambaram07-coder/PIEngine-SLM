@@ -20,6 +20,8 @@ class MainApplication : Application(), ReactApplication {
             PackageList(this).packages.apply {
               // Own-process logcat reader for the in-app diagnostics log (see LogcatModule).
               add(LogcatPackage())
+              // schedule_event's real device handoff (see CalendarModule).
+              add(CalendarPackage())
             }
 
         override fun getJSMainModuleName(): String = "index"

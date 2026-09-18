@@ -21,7 +21,18 @@ export const QUERY_PREFIX =
 
 // Attachments (per turn: one jpg/jpeg/pdf/txt/md) — limits live in src/attachments.ts.
 export const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
-export const MAX_TOOL_ROUNDS = 3;
+// Matches runtime/app.py's MAX_TOOL_ROUNDS. An agent that calls N tools needs
+// N rounds plus one more to produce its closing answer — with headroom to
+// spare for an agent that calls 2 or 3 (e.g. Meeting Minutes: draft_email,
+// schedule_event).
+export const MAX_TOOL_ROUNDS = 4;
+
+// This app's own versionName. There is no runtime API for a JS bundle to read
+// its host APK's manifest, so this is a plain constant — bump it by hand in
+// the same commit that bumps versionName in android/app/build.gradle. Used
+// to gate an agent whose attached tools need a newer app build than this one
+// (see src/portal.ts isAppCompatible / min_app_version).
+export const APP_VERSION = '3.3';
 
 // Deployment-specific addresses live in config.local.ts, which is gitignored
 // so a public repo never carries the hostnames of a running deployment.

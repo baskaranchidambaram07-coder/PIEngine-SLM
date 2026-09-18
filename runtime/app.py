@@ -100,6 +100,17 @@ def pii_enabled(manifest: dict) -> bool:
     return bool((manifest.get("guardrails") or {}).get("pii"))
 
 
+def analysis_mode_enabled(manifest: dict) -> bool:
+    """Per-agent switch: read a large attachment in full via a map-reduce
+    digest instead of top-k retrieval. Same shape and same default-off
+    reasoning as pii_enabled — an agent whose job is targeted Q&A over its own
+    knowledge base should keep using retrieval; a document-analysis agent
+    needs the whole document, which retrieval by definition cannot give it
+    when the question ("analyse this") carries no topical signal of its own.
+    """
+    return bool((manifest.get("analysis") or {}).get("enabled"))
+
+
 def adapter_state(manifest: dict) -> str:
     ad = manifest.get("adapter")
     if not ad:
@@ -634,6 +645,20 @@ def build_system_prompt(manifest: dict, with_tools: bool = True) -> str:
     return prompt + " /no_think"
 
 
+# Whole-document analysis (analysis_mode_enabled): a map-reduce digest of a
+# large attachment. Bounded so a pathological transcript costs minutes, not
+# hours — beyond this many sections, the earliest ones win and the digest
+# says so. ~1200 chars/section (core.chunking's target) -> ~48k chars covered.
+MAX_DIGEST_CHUNKS = 40
+
+DIGEST_SYSTEM_PROMPT = (
+    "You are extracting facts from one section of a longer document. In 3 to 6 "
+    "terse bullet points, list only concrete facts: decisions made, names "
+    "mentioned, dates, numbers, commitments, and action items. No preamble, no "
+    "commentary, no restating that this is a summary. If the section has "
+    "nothing substantive, reply exactly: nothing notable. /no_think"
+)
+
 ATTACHMENT_RULES = ("\n\nThe user has attached a file. Text from it appears under "
                     "'Attached document'. Answer questions about the file from that text, "
                     "quote it where useful, and say plainly when the file does not contain "
@@ -746,9 +771,42 @@ def api_chat(body: ChatIn):
             # is final for a blocked file; a clear file still gets its
             # retrieved chunks judged the first time they are used.
             att_sources: list[dict] = []
+            att_digested = False
             if att:
                 g = att.get("guard") or {}
-                att_sources = attachments.context_for(att, user_query)
+                if analysis_mode_enabled(manifest) and not att.get("small"):
+                    # A bare "analyse this" carries no topical signal for top-k
+                    # retrieval to match against, and the whole document will not
+                    # fit the context window at once. Map: extract concrete facts
+                    # from each section with the agent's own model (reusing
+                    # _chat_text, the same non-tool completion helper the PII
+                    # judge already uses); reduce: the extracts become the
+                    # "attachment" context in place of retrieved passages, so
+                    # every downstream step — the guard's chunk judge, the
+                    # context block, the sources shown to the user — is
+                    # unchanged code operating on a different att_sources.
+                    full = attachments.full_text(att["id"])
+                    chunks = chunking.split_text(full) if full else []
+                    truncated = len(chunks) > MAX_DIGEST_CHUNKS
+                    chunks = chunks[:MAX_DIGEST_CHUNKS]
+                    for i, chunk in enumerate(chunks):
+                        yield sse({"type": "status",
+                                  "text": f'Reading section {i + 1}/{len(chunks)} of "{att["name"]}"…'})
+                        extract = _chat_text(
+                            [{"role": "system", "content": DIGEST_SYSTEM_PROMPT},
+                             {"role": "user", "content": chunk}],
+                            {"temperature": 0.1, "max_tokens": 220},
+                        ).strip()
+                        if extract and "nothing notable" not in extract.lower():
+                            att_sources.append({"chunk_id": -1, "doc_name": att["name"], "chunk_index": i,
+                                               "text": extract, "score": 1.0, "kind": "attachment"})
+                    if truncated and att_sources:
+                        att_sources[-1]["text"] += (
+                            f"\n\n[transcript truncated after {MAX_DIGEST_CHUNKS} sections — "
+                            "earliest sections were prioritised]")
+                    att_digested = True
+                else:
+                    att_sources = attachments.context_for(att, user_query)
                 if pii and att_sources and guard.judge_enabled_for("attachment", pol):
                     judged = set(g.get("judged_chunks") or [])
                     fresh = [s for s in att_sources if s["chunk_index"] not in judged]
@@ -800,7 +858,9 @@ def api_chat(body: ChatIn):
             else:
                 context_block = ""
                 if att_sources:
-                    how = "full text" if att.get("small") else "relevant passages"
+                    how = ("full text" if att.get("small")
+                           else "a condensed digest of the whole document" if att_digested
+                           else "relevant passages")
                     context_block += (f"Attached document \"{att['name']}\" ({how}):\n\n"
                                       + "\n\n".join(f"[{att['name']} #{s['chunk_index']}]\n{s['text']}"
                                                     for s in att_sources) + "\n\n---\n\n")

@@ -91,6 +91,48 @@ that its text appears under *Attached document*, and to say plainly when the
 file does not contain the answer. Sources are streamed to the UI tagged
 `attachment` (📎) or `kb` (📄).
 
+## 4a. Whole-document analysis mode (opt-in per agent)
+
+Top-k retrieval answers *questions*; it cannot answer "analyse this," because
+a bare instruction like that carries no topical signal for cosine similarity
+to match chunks against, and a real multi-page document will not fit an
+8k-token context alongside the system prompt and tool schemas either way.
+
+`analysis.enabled` is a per-agent manifest field (Studio → the agent's
+Details tab, *Document analysis* panel), off by default, set the same way
+`guardrails.pii` is: `runtime/app.py`'s `analysis_mode_enabled(manifest)`
+mirrors `pii_enabled(manifest)` exactly — same `(manifest.get(...) or {})`
+guard, so every agent published before this existed (which have no
+`analysis` key at all) is completely unaffected.
+
+When it is on and the attachment is not small enough to inject whole, the
+runtime replaces top-k retrieval with a **map-reduce digest**:
+
+1. **Map.** The document is split with the same section-aware
+   `core.chunking.split_text` the knowledge base uses. Each section is sent
+   to the agent's own model with a separate, tool-free completion (reusing
+   `_chat_text`, the same non-streaming helper the PII judge already calls)
+   and a terse extraction prompt: pull only concrete facts — decisions,
+   names, dates, numbers, commitments, action items — as 3–6 bullets, no
+   commentary. A `status` event streams per section ("Reading section
+   7/12…") so the wait is visible, not silent.
+2. **Reduce.** The bullet extracts become the attachment's context in place
+   of retrieved passages — same list shape, same `kind: "attachment"` — so
+   every downstream step (the PII judge's chunk review, the context block,
+   the `sources` event) is unchanged code running on a different source.
+
+Bounded at `MAX_DIGEST_CHUNKS = 40` sections (~48k characters); beyond that,
+the earliest sections win and the digest says so.
+
+**Measured** (`prototypes/meeting_minutes_bench.py`, against the installed
+**Meeting Minutes** agent, Qwen3-1.7B, on the EC2 4-vCPU box): a synthetic
+5,773-character, 12-section transcript digested in ~150 s (about 11 s per
+section), after which the model autonomously called `draft_email` and
+`schedule_event` — in that order, unprompted beyond "analyse this" — and
+each tool's result was confirmed present in `device_data.json` afterward.
+(This was measured with a third tool, `save_note`, also attached; it was
+removed from the tool catalogue on 2026-09-18 as unreliable on-device.)
+
 ## 5. Vision
 
 Images are answered by **Qwen3-VL-2B-Instruct** (Apache-2.0; base Q4_K_M
