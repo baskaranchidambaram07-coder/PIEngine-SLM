@@ -108,10 +108,12 @@ def main() -> int:
         for a in new_actions:
             print(f"  {a['title']} — owner={a.get('owner')} due={a.get('due_date')}")
 
-    ok = bool(new_notes) and bool(new_emails) and bool(new_events)
+    # save_note was removed from the tool catalogue (2026-09-18, unreliable
+    # on-device) — the agent now only drafts an email and schedules a
+    # follow-up, so completion no longer requires a note.
+    ok = bool(new_emails) and bool(new_events)
     print(f"\nRESULT: {'PASS' if ok else 'INCOMPLETE'} — "
-         f"note={'yes' if new_notes else 'NO'}, email={'yes' if new_emails else 'NO'}, "
-         f"event={'yes' if new_events else 'NO'}")
+         f"email={'yes' if new_emails else 'NO'}, event={'yes' if new_events else 'NO'}")
     return 0 if ok else 1
 
 
